@@ -219,6 +219,138 @@ def markdown_table(headers: List[str], rows: List[List[str]]) -> str:
     return "\n".join([head, sep] + body)
 
 
+def note_card(title: str, body: str) -> None:
+    st.markdown(f'<div class="paper-card"><strong>{title}</strong><br>{body}</div>', unsafe_allow_html=True)
+
+
+def fmt_num(x: float) -> str:
+    return f"{float(x):.4f}"
+
+
+def pair_radius(pair: np.ndarray) -> float:
+    return float(np.linalg.norm(np.asarray(pair, dtype=float)))
+
+
+def pair_angle(pair: np.ndarray) -> float:
+    return float(math.degrees(math.atan2(float(pair[1]), float(pair[0]))))
+
+
+def pair_summary_rows(original_pair: np.ndarray, quant_pair: np.ndarray) -> List[List[str]]:
+    o = np.asarray(original_pair, dtype=float)
+    q = np.asarray(quant_pair, dtype=float)
+    return [
+        ["좌표 1", fmt_num(o[0]), fmt_num(q[0]), fmt_num(q[0] - o[0])],
+        ["좌표 2", fmt_num(o[1]), fmt_num(q[1]), fmt_num(q[1] - o[1])],
+        ["반지름 r", fmt_num(pair_radius(o)), fmt_num(pair_radius(q)), fmt_num(pair_radius(q) - pair_radius(o))],
+        ["각도 θ (deg)", fmt_num(pair_angle(o)), fmt_num(pair_angle(q)), fmt_num(pair_angle(q) - pair_angle(o))],
+    ]
+
+
+def render_pair_summary(title: str, original_pair: np.ndarray, quant_pair: np.ndarray, emphasis: str) -> None:
+    with st.expander(title, expanded=False):
+        st.markdown(markdown_table(["항목", "원본", "양자화 후", "변화량"], pair_summary_rows(original_pair, quant_pair)))
+        st.caption(emphasis)
+
+
+def render_turbo_slice_explainer() -> None:
+    with st.expander("Turbo 단면 그림 읽는 법", expanded=False):
+        st.markdown(
+            """
+- **오른쪽 단면 예시**는 선택한 벡터의 한 좌표쌍 `(x[2i], x[2i+1])` 이 양자화 전후에 어디로 이동했는지 보여 줍니다.
+- **TurboQuant 핵심**은 각 좌표를 **공통 scalar codebook**에 각각 스냅하는 것이므로, 단면에서는 점이 **격자(grid)** 위로 붙는 모양이 나타납니다.
+- 아래 **좌표 변화 표**에서는 좌표 1·2, pair 반지름, pair 각도 변화량을 함께 읽으면 됩니다.
+
+**간단 공식**
+1. 입력 방향을 무작위 회전: `z = R(x / ||x||)`
+2. 각 좌표를 코드북에 독립적으로 스냅: `\hat z_j = Q_b(z_j)`
+3. 역회전 후 길이를 다시 곱해 복원: `\hat x = ||x|| R^\top \hat z`
+
+**발표할 때는 이렇게 말하면 됩니다**
+- Turbo는 **학습된 군집 맵**이 아니라, 회전 후 좌표들이 고르게 퍼질 때 **좌표별 코드북**이 잘 맞는 구조입니다.
+- 그래서 단면 그림에서는 원본 점이 가장 가까운 **격자 교차점**으로 이동하는 모습으로 이해하면 됩니다.
+            """
+        )
+
+
+
+def render_polar_slice_explainer() -> None:
+    with st.expander("Polar 단면 그림 읽는 법", expanded=False):
+        st.markdown(
+            """
+- **Polar 단면 예시**는 선택한 벡터의 한 좌표쌍을 `(반지름 r, 각도 θ)` 관점으로 읽도록 만든 그림입니다.
+- **방사형 점선**은 첫 레벨 angle codebook의 직관용 그림이고, **동심원**은 선택 벡터의 원본/양자화 후 반지름을 뜻합니다.
+- 논문 구현은 단순 균일 bin이 아니라 **preconditioning 뒤 angle distribution 기반 optimized codebook**을 사용한다는 점을 함께 기억하면 좋습니다.
+
+**간단 공식**
+1. 입력을 preconditioning: `z = R x`
+2. polar 변환: `(r, \Theta) = \mathrm{Polar}(z)`
+3. 각도를 코드북에 스냅: `\hat\Theta = Q(\Theta)`
+4. `r` 와 `\hat\Theta` 로 Cartesian 복원
+
+**발표할 때는 이렇게 말하면 됩니다**
+- Turbo가 **격자형 스냅**이라면, Polar는 **각도형 스냅**입니다.
+- 단면에서는 `θ → θ̂` 변화가 핵심이지만, 재귀 결합 때문에 실제 pair 반지름도 조금 달라질 수 있어 **r / r̂** 도 함께 보는 편이 정확합니다.
+            """
+        )
+
+
+
+def render_qjl_core_explainer() -> None:
+    with st.expander("QJL 핵심 설명 / 공식 / 발표 포인트", expanded=False):
+        st.markdown(
+            """
+**핵심 한 줄**
+- QJL의 본질은 **벡터 복원**이 아니라 **asymmetric inner-product estimation** 입니다.
+
+**무엇을 저장하나**
+- **query**: JL transform을 거친 실수 projection `Sq`
+- **key**: sign-bit sketch `sign(Sk)` 와 key norm
+- **value**: 논문 맥락에서는 별도 **token-wise quantization** 으로 처리
+
+**직관 공식**
+- `q \mapsto Sq`
+- `k \mapsto QJL(S,k) = sign(Sk) \cdot ||k||_2 / \sqrt{m}`
+- 이 둘의 내적으로 `\langle q, k \rangle` 를 추정
+
+**이 탭을 읽는 법**
+- 왼쪽 3D는 **JL 투영 → sign sketch** 흐름을 보여 주는 설명용 그림입니다.
+- 진짜 평가는 오른쪽의 **실제 vs 추정 내적**, 그리고 아래의 **IP bias / IP MAE / IP corr** 로 보는 편이 정확합니다.
+- 그래서 QJL은 Turbo/Polar와 같은 복원형 quantizer 비교축으로 놓기보다, **내적 추정기 축**으로 분리해서 설명하는 것이 논문 취지에 더 가깝습니다.
+            """
+        )
+
+
+
+def render_projection_reference(x_points: np.ndarray, x_hat_points: np.ndarray, color_ids: np.ndarray, levels: int, seed: int) -> None:
+    with st.expander("3D 투영 방식 설명 / 간단 시연", expanded=False):
+        overview_tab, demo_tab = st.tabs(["빠른 표", "간단 시연"])
+        with overview_tab:
+            st.markdown(markdown_table(["투영 방식", "무엇을 보나", "언제 쓰기 좋은가"], [
+                ["Random projection", "임의 축으로 전체 구조를 고르게 펼쳐 보는 방식", "발표에서 형태를 직관적으로 보여 줄 때"],
+                ["PCA", "분산이 큰 축을 우선으로 잡아 데이터의 주된 변화를 보여 줌", "구조 차이를 강조하고 싶을 때"],
+                ["First 3 coordinates", "원본 좌표의 앞 3축만 그대로 사용", "투영 자체의 가공을 최소화하고 싶을 때"],
+            ]))
+            st.caption("중요: 이 투영 방식은 시각화용 도구이며, 양자화 알고리즘 자체를 바꾸는 설정은 아닙니다.")
+        with demo_tab:
+            ref = np.vstack([x_points, x_hat_points])
+            cols = st.columns(3)
+            for col, method, offset in zip(cols, ["Random projection", "PCA", "First 3 coordinates"], [901, 902, 903]):
+                mean_p, basis_p = fit_projector(ref, method, int(seed) + offset, 3)
+                proj_x = apply_projector(x_points, mean_p, basis_p)
+                proj_hat = apply_projector(x_hat_points, mean_p, basis_p)
+                with col:
+                    st.plotly_chart(
+                        scatter_overlay_3d(
+                            proj_x,
+                            proj_hat,
+                            method,
+                            color_ids=color_ids,
+                            levels=levels,
+                            recon_name="양자화 후",
+                        ),
+                        width="stretch",
+                        theme=None,
+                    )
 def discrete_palette(n: int) -> List[str]:
     if n <= 1:
         return [RED]
@@ -749,6 +881,7 @@ def process_figure_3d(
                 name="최종 상태",
                 customdata=point_indices[:, None],
                 marker=dict(size=3.2, opacity=0.18, color=colors_final),
+                hovertemplate="벡터 #%{customdata[0]}<extra></extra>",
             ),
             go.Scatter3d(
                 x=original_3d[:, 0], y=original_3d[:, 1], z=original_3d[:, 2],
@@ -756,6 +889,7 @@ def process_figure_3d(
                 name="원본 기준",
                 customdata=point_indices[:, None],
                 marker=dict(size=3.0, opacity=0.16, color=BLUE),
+                hovertemplate="벡터 #%{customdata[0]}<extra></extra>",
             ),
             go.Scatter3d(
                 x=pts[:, 0], y=pts[:, 1], z=pts[:, 2],
@@ -763,6 +897,7 @@ def process_figure_3d(
                 name="현재 단계",
                 customdata=point_indices[:, None],
                 marker=dict(size=4.5, opacity=0.94, color=colors, line=dict(width=0.45, color="white")),
+                hovertemplate="벡터 #%{customdata[0]}<extra></extra>",
             ),
         ]
         if np.any(selected_mask):
@@ -779,9 +914,9 @@ def process_figure_3d(
         frames.append(go.Frame(name=label, data=frame_data, traces=list(range(len(frame_data)))))
 
     data = [
-        go.Scatter3d(x=quantized_3d[:, 0], y=quantized_3d[:, 1], z=quantized_3d[:, 2], mode="markers", name="최종 상태", customdata=point_indices[:, None], marker=dict(size=3.2, opacity=0.18, color=colors_final)),
-        go.Scatter3d(x=original_3d[:, 0], y=original_3d[:, 1], z=original_3d[:, 2], mode="markers", name="원본 기준", customdata=point_indices[:, None], marker=dict(size=3.0, opacity=0.16, color=BLUE)),
-        go.Scatter3d(x=quantized_3d[:, 0], y=quantized_3d[:, 1], z=quantized_3d[:, 2], mode="markers", name="현재 단계", customdata=point_indices[:, None], marker=dict(size=4.5, opacity=0.94, color=colors_final, line=dict(width=0.45, color="white"))),
+        go.Scatter3d(x=quantized_3d[:, 0], y=quantized_3d[:, 1], z=quantized_3d[:, 2], mode="markers", name="최종 상태", customdata=point_indices[:, None], marker=dict(size=3.2, opacity=0.18, color=colors_final), hovertemplate="벡터 #%{customdata[0]}<extra></extra>"),
+        go.Scatter3d(x=original_3d[:, 0], y=original_3d[:, 1], z=original_3d[:, 2], mode="markers", name="원본 기준", customdata=point_indices[:, None], marker=dict(size=3.0, opacity=0.16, color=BLUE), hovertemplate="벡터 #%{customdata[0]}<extra></extra>"),
+        go.Scatter3d(x=quantized_3d[:, 0], y=quantized_3d[:, 1], z=quantized_3d[:, 2], mode="markers", name="현재 단계", customdata=point_indices[:, None], marker=dict(size=4.5, opacity=0.94, color=colors_final, line=dict(width=0.45, color="white")), hovertemplate="벡터 #%{customdata[0]}<extra></extra>"),
     ]
     if np.any(selected_mask):
         sel_pts = quantized_3d[selected_mask]
@@ -792,6 +927,7 @@ def process_figure_3d(
                 name=f"선택 벡터 #{int(selected_index)}",
                 customdata=point_indices[selected_mask, None],
                 marker=dict(size=8.5, opacity=1.0, color="#111827", line=dict(width=2.0, color="#f59e0b")),
+                hovertemplate="벡터 #%{customdata[0]}<extra></extra>",
             )
         )
 
@@ -839,6 +975,7 @@ def process_figure_3d(
         }],
         legend=dict(bgcolor="rgba(255,255,255,0.82)", font=dict(color="black")),
         paper_bgcolor="white",
+        selectionrevision=str(selected_index) if selected_index is not None else "none",
     )
     return fig
 
@@ -919,6 +1056,9 @@ def pair_cloud_figure(
     show_unit_circle: bool = False,
     quant_name: str = "양자화 좌표쌍",
     original_name: str = "원본 좌표쌍",
+    selected_original_pair: Optional[np.ndarray] = None,
+    selected_quant_pair: Optional[np.ndarray] = None,
+    radius_rings: Optional[np.ndarray] = None,
 ) -> go.Figure:
     point_indices = np.arange(len(original_pairs), dtype=int) if point_indices is None else np.asarray(point_indices, dtype=int)
     fig = go.Figure()
@@ -934,16 +1074,28 @@ def pair_cloud_figure(
         ray_r = 1.05 * max_abs
         for ang in np.asarray(radial_angles).tolist():
             fig.add_trace(go.Scatter(x=[0.0, ray_r * math.cos(float(ang))], y=[0.0, ray_r * math.sin(float(ang))], mode="lines", line=dict(color="#94a3b8", width=1, dash="dot"), name="각도 코드북", showlegend=False, hoverinfo="skip"))
+    if radius_rings is not None:
+        theta = np.linspace(0.0, 2 * np.pi, 220)
+        for ridx, radius in enumerate(np.asarray(radius_rings, dtype=float).tolist()):
+            if radius <= 0:
+                continue
+            fig.add_trace(go.Scatter(x=radius * np.cos(theta), y=radius * np.sin(theta), mode="lines", line=dict(color="#cbd5e1", width=1.1, dash="dot"), name="반지름 기준", showlegend=(ridx == 0), hoverinfo="skip"))
     if show_unit_circle:
         theta = np.linspace(0.0, 2 * np.pi, 240)
         fig.add_trace(go.Scatter(x=np.cos(theta), y=np.sin(theta), mode="lines", line=dict(color="#cbd5e1", width=1.3, dash="dot"), name="단위 원", hoverinfo="skip"))
-    fig.add_trace(go.Scatter(x=original_pairs[:, 0], y=original_pairs[:, 1], mode="markers", customdata=point_indices[:, None], marker=dict(size=5, opacity=0.28, color=BLUE), name=original_name))
-    fig.add_trace(go.Scatter(x=quant_pairs[:, 0], y=quant_pairs[:, 1], mode="markers", customdata=point_indices[:, None], marker=dict(size=5.5, opacity=0.9, color=q_colors, line=dict(width=0.3, color="white")), name=quant_name))
+    fig.add_trace(go.Scatter(x=original_pairs[:, 0], y=original_pairs[:, 1], mode="markers", customdata=point_indices[:, None], marker=dict(size=5, opacity=0.28, color=BLUE), name=original_name, hovertemplate="벡터 #%{customdata[0]}<extra></extra>"))
+    fig.add_trace(go.Scatter(x=quant_pairs[:, 0], y=quant_pairs[:, 1], mode="markers", customdata=point_indices[:, None], marker=dict(size=5.5, opacity=0.9, color=q_colors, line=dict(width=0.3, color="white")), name=quant_name, hovertemplate="벡터 #%{customdata[0]}<extra></extra>"))
     if selected_index is not None:
         selected_mask = point_indices == int(selected_index)
         if np.any(selected_mask):
-            fig.add_trace(go.Scatter(x=quant_pairs[selected_mask, 0], y=quant_pairs[selected_mask, 1], mode="markers", customdata=point_indices[selected_mask, None], marker=dict(size=10.5, color="#111827", line=dict(width=2.0, color="#f59e0b")), name=f"선택 벡터 #{int(selected_index)}"))
-    fig.update_layout(template="plotly_white", title=dict(text=title, font=dict(color="black")), height=420, margin=dict(l=10, r=10, t=40, b=10), clickmode="event+select", xaxis_title="좌표축 1", yaxis_title="좌표축 2", yaxis=dict(scaleanchor="x", scaleratio=1), plot_bgcolor="white", paper_bgcolor="white", font=dict(color="black"))
+            fig.add_trace(go.Scatter(x=quant_pairs[selected_mask, 0], y=quant_pairs[selected_mask, 1], mode="markers", customdata=point_indices[selected_mask, None], marker=dict(size=10.5, color="#111827", line=dict(width=2.0, color="#f59e0b")), name=f"선택 벡터 #{int(selected_index)}", hovertemplate="벡터 #%{customdata[0]}<extra></extra>"))
+    if selected_original_pair is not None:
+        op = np.asarray(selected_original_pair, dtype=float)
+        fig.add_trace(go.Scatter(x=[0.0, op[0]], y=[0.0, op[1]], mode="lines", line=dict(width=2, color=BLUE), name="선택 원본 반지름", hoverinfo="skip"))
+    if selected_quant_pair is not None:
+        qp = np.asarray(selected_quant_pair, dtype=float)
+        fig.add_trace(go.Scatter(x=[0.0, qp[0]], y=[0.0, qp[1]], mode="lines", line=dict(width=2, color=RED, dash="dash"), name="선택 양자화 반지름", hoverinfo="skip"))
+    fig.update_layout(template="plotly_white", title=dict(text=title, font=dict(color="black")), height=420, margin=dict(l=10, r=10, t=40, b=10), clickmode="event+select", xaxis_title="좌표축 1", yaxis_title="좌표축 2", yaxis=dict(scaleanchor="x", scaleratio=1), plot_bgcolor="white", paper_bgcolor="white", font=dict(color="black"), selectionrevision=str(selected_index) if selected_index is not None else "none")
     return fig
 
 
@@ -988,37 +1140,54 @@ def bit_pattern_multiselect(label: str, bits: int, key: str) -> List[int]:
 def extract_selected_point_index(event: Any) -> Optional[int]:
     if event is None:
         return None
-    selection = event
-    if hasattr(event, "selection"):
-        selection = event.selection
-    if isinstance(event, dict) and "selection" in event:
+
+    candidate_points = []
+    if isinstance(event, dict):
+        if isinstance(event.get("points"), list):
+            candidate_points.extend(event.get("points") or [])
         selection = event.get("selection")
-    points = None
-    if hasattr(selection, "points"):
-        points = selection.points
-    elif isinstance(selection, dict):
-        points = selection.get("points")
-    if not points:
-        return None
-    point = points[0]
-    customdata = None
-    if hasattr(point, "customdata"):
-        customdata = point.customdata
-    elif isinstance(point, dict):
-        customdata = point.get("customdata")
-    if isinstance(customdata, (list, tuple, np.ndarray)):
-        customdata = customdata[0] if len(customdata) else None
-    if customdata is not None:
-        try:
-            return int(customdata)
-        except Exception:
-            pass
-    point_number = None
-    if hasattr(point, "point_number"):
-        point_number = point.point_number
-    elif isinstance(point, dict):
-        point_number = point.get("point_number", point.get("pointNumber", point.get("pointIndex")))
-    return int(point_number) if point_number is not None else None
+        if isinstance(selection, dict) and isinstance(selection.get("points"), list):
+            candidate_points.extend(selection.get("points") or [])
+    if hasattr(event, "points") and getattr(event, "points"):
+        candidate_points.extend(getattr(event, "points"))
+    if hasattr(event, "selection") and hasattr(event.selection, "points") and event.selection.points:
+        candidate_points.extend(event.selection.points)
+
+    if not candidate_points and isinstance(event, dict):
+        selection = event.get("selection")
+        point_indices = None
+        if isinstance(selection, dict):
+            point_indices = selection.get("point_indices") or selection.get("pointIndices")
+        if point_indices:
+            try:
+                return int(point_indices[0])
+            except Exception:
+                pass
+
+    for point in candidate_points:
+        customdata = None
+        if hasattr(point, "customdata"):
+            customdata = point.customdata
+        elif isinstance(point, dict):
+            customdata = point.get("customdata")
+        if isinstance(customdata, (list, tuple, np.ndarray)):
+            customdata = customdata[0] if len(customdata) else None
+        if customdata is not None:
+            try:
+                return int(customdata)
+            except Exception:
+                pass
+        point_number = None
+        if hasattr(point, "point_number"):
+            point_number = point.point_number
+        elif isinstance(point, dict):
+            point_number = point.get("point_number", point.get("pointNumber", point.get("pointIndex")))
+        if point_number is not None:
+            try:
+                return int(point_number)
+            except Exception:
+                pass
+    return None
 
 
 def plotly_chart_pick(fig: go.Figure, key: str) -> Optional[int]:
@@ -1033,12 +1202,32 @@ def plotly_chart_pick(fig: go.Figure, key: str) -> Optional[int]:
     return extract_selected_point_index(event)
 
 
+def sync_inspect_vector_from_widget() -> None:
+    st.session_state.inspect_vector_value = int(st.session_state.get("inspect_vector_widget", 0))
+    st.session_state.inspect_vector_pending = None
+
+
+
+def apply_pending_inspect_vector(max_index: int) -> None:
+    pending = st.session_state.get("inspect_vector_pending")
+    if pending is None:
+        current = int(st.session_state.get("inspect_vector_value", st.session_state.get("inspect_vector_widget", 0)))
+    else:
+        current = int(pending)
+        st.session_state.inspect_vector_pending = None
+    current = int(max(0, min(max_index, current)))
+    st.session_state.inspect_vector_value = current
+    st.session_state.inspect_vector_widget = current
+
+
+
 def update_inspect_vector(selected_index: Optional[int], max_index: int) -> None:
     if selected_index is None:
         return
     selected_index = int(max(0, min(max_index, selected_index)))
-    if st.session_state.get("inspect_vector_input", 0) != selected_index:
-        st.session_state.inspect_vector_input = selected_index
+    current = int(st.session_state.get("inspect_vector_value", st.session_state.get("inspect_vector_widget", 0)))
+    if current != selected_index or st.session_state.get("inspect_vector_pending") != selected_index:
+        st.session_state.inspect_vector_pending = selected_index
         st.rerun()
 
 
@@ -1105,7 +1294,7 @@ def turbo_ideal_explainer(bits: int) -> None:
         st.markdown(
             f"""
 **이 그림이 뜻하는 것**
-- TurboQuant는 데이터셋 전용 오프라인 맵을 학습하는 그림이라기보다, **무작위 회전 뒤 좌표별 스칼라 양자화가 잘 보이는 이상화된 입력 분포**를 3D로 단순화한 그림입니다.
+- TurboQuant는 데이터셋 전용 **learned cluster map**을 보여 주는 그림이 아니라, **무작위 회전 뒤 공통 scalar codebook이 잘 작동하는 상황**을 직관적으로 보여 주는 이상화된 입력 분포입니다.
 - 구 표면 계열은 **방향이 고르게 퍼진 경우**, 구 내부 계열은 **길이까지 다양하게 섞인 경우**를 뜻합니다.
 - 현재 설정에서는 좌표마다 **{2 ** max(1, bits)}개 레벨**로 스냅되므로, 선택한 좌표쌍 평면에서는 `({2 ** max(1, bits)}) × ({2 ** max(1, bits)})` Turbo 격자가 나타납니다.
 
@@ -1136,6 +1325,7 @@ def polar_ideal_explainer(bits: int, first_bits: int, upper_bits: int) -> None:
 - PolarQuant는 점을 polar 좌표계로 바꿔 **반지름은 유지하고 각도만 코드북에 스냅**하는 방법입니다.
 - 이 이상 분포 그림은 **preconditioning 뒤 각도 분포가 잘 정리된 상태**를 단순화해서 보여줍니다.
 - 현재 설정에서 첫 레벨 각도는 **{2 ** max(1, first_bits)}개**, 상위 레벨 각도는 **{2 ** max(1, upper_bits)}개** 코드북으로 스냅됩니다.
+- **중요:** 이 앱의 방사형 bin 그림은 angle snap 직관을 위한 단순화이며, 논문 구현은 preconditioning 뒤 angle distribution을 바탕으로 **optimized codebook**과 **level-dependent bit allocation**을 사용합니다.
 
 **핵심 식**
 1. 입력을 무작위 회전
@@ -1150,10 +1340,106 @@ def polar_ideal_explainer(bits: int, first_bits: int, upper_bits: int) -> None:
         st.markdown(
             """
 **발표용 해석 포인트**
-- Polar 좌표쌍 구름도에 보이는 **방사선 묶음**은 첫 레벨 각도 코드북입니다.
+- Polar 좌표쌍 구름도에 보이는 **방사선 묶음**은 첫 레벨 각도 코드북의 단순화된 직관 그림입니다.
 - 즉, Turbo가 **격자형 스냅**이라면 Polar는 **각도형 스냅**으로 보면 이해가 쉽습니다.
+- 논문 구현 쪽으로 말할 때는 “균일 각도 bin을 그대로 쓰는 방법”이라기보다, **분포 기반 codebook**을 실제 구현에 반영한다는 점을 함께 말하는 편이 안전합니다.
             """
         )
+
+
+def metric_reference_specs() -> List[Dict[str, str]]:
+    return [
+        {
+            "metric": "MSE",
+            "formula": r"\frac{1}{n}\sum_{i=1}^{n} \|x_i-\hat x_i\|_2^2",
+            "meaning": "벡터 전체 오차 에너지. 큰 오차를 특히 크게 벌점합니다.",
+            "good": "0에 가까울수록 좋음",
+            "talk": "전체 복원 품질의 기본 점수로 소개하면 좋습니다.",
+        },
+        {
+            "metric": "MAE",
+            "formula": r"\frac{1}{nd}\sum_{i=1}^{n}\sum_{j=1}^{d} |x_{ij}-\hat x_{ij}|",
+            "meaning": "좌표 하나하나의 평균 절대 오차입니다.",
+            "good": "0에 가까울수록 좋음",
+            "talk": "MSE보다 이상치 영향이 덜한 평균 오차라고 설명하기 좋습니다.",
+        },
+        {
+            "metric": "Mean cosine",
+            "formula": r"\frac{1}{n}\sum_{i=1}^{n} \frac{\langle x_i, \hat x_i\rangle}{\|x_i\|_2\,\|\hat x_i\|_2}",
+            "meaning": "원본과 복원 벡터의 방향이 얼마나 비슷한지 봅니다.",
+            "good": "1에 가까울수록 좋음",
+            "talk": "벡터 방향 보존력이 중요할 때 해석하기 좋습니다.",
+        },
+        {
+            "metric": "IP bias",
+            "formula": r"\frac{1}{n}\sum_{i=1}^{n} (\langle q,\hat x_i\rangle-\langle q,x_i\rangle)",
+            "meaning": "내적 추정이 평균적으로 한쪽으로 치우치는지 보여줍니다.",
+            "good": "0에 가까울수록 좋음",
+            "talk": "플러스면 과대추정, 마이너스면 과소추정이라고 말하면 됩니다.",
+        },
+        {
+            "metric": "IP MAE",
+            "formula": r"\frac{1}{n}\sum_{i=1}^{n} |\langle q,\hat x_i\rangle-\langle q,x_i\rangle|",
+            "meaning": "내적 기준 평균 절대 오차입니다.",
+            "good": "0에 가까울수록 좋음",
+            "talk": "검색/어텐션처럼 내적 자체가 중요한 작업에서 핵심 지표입니다.",
+        },
+        {
+            "metric": "IP corr",
+            "formula": r"\mathrm{corr}(\langle q,x_i\rangle,\langle q,\hat x_i\rangle)",
+            "meaning": "실제 내적 순서를 얼마나 잘 보존하는지 봅니다.",
+            "good": "1에 가까울수록 좋음",
+            "talk": "랭킹 보존 관점에서 발표할 때 직관이 좋습니다.",
+        },
+    ]
+
+
+
+def render_metric_reference() -> None:
+    specs = metric_reference_specs()
+    with st.expander("지표 설명 / 공식 / 해석", expanded=False):
+        overview_tab, formula_tab, guide_tab = st.tabs(["빠른 표", "공식", "발표용 해석"])
+        with overview_tab:
+            rows = [[item["metric"], item["meaning"], item["good"]] for item in specs]
+            st.markdown(markdown_table(["지표", "무엇을 보는가", "좋은 방향"], rows))
+            st.caption("요약: MSE · MAE · IP MAE는 낮을수록, Mean cosine · IP corr는 높을수록, IP bias는 0에 가까울수록 좋습니다.")
+        with formula_tab:
+            for item in specs:
+                st.markdown(f"#### {item['metric']}")
+                st.latex(item["formula"])
+                st.markdown(f"- **의미:** {item['meaning']}\n- **좋은 방향:** {item['good']}")
+        with guide_tab:
+            rows = [[item["metric"], item["talk"], item["good"]] for item in specs]
+            st.markdown(markdown_table(["지표", "발표에서 이렇게 읽기", "수렴 방향"], rows))
+            st.markdown(
+                "- **의미:** query는 `Sq` 형태로 실수 projection을 유지하고, key만 sign-bit sketch로 저장합니다.\n"
+                "- **중요:** 이 식이 unbiased inner-product estimator의 핵심이라서, QJL은 Turbo/Polar처럼 복원 오차 그림만으로 판단하면 안 됩니다."
+            )
+        with guide_tab:
+            st.markdown(markdown_table(["발표 포인트", "이렇게 말하면 쉬움"], [
+                ["3D 그림의 역할", "왼쪽 3D는 복원형 quantizer 그림이 아니라, JL 투영 → sign sketch라는 흐름을 눈으로 보여 주는 보조 그림입니다."],
+                ["진짜 핵심 지표", "QJL은 IP bias, IP MAE, IP corr 같은 내적 추정 지표로 읽는 편이 논문 취지에 맞습니다."],
+                ["Value cache", "QJL 논문은 value cache까지 같은 방식으로 처리하는 것이 아니라, value는 표준 token-wise quantization을 사용합니다."],
+            ]))
+
+
+def render_alignment_reference() -> None:
+    with st.expander("논문 원안 여부 / 비교 축 정리", expanded=False):
+        align_tab, axis_tab = st.tabs(["논문 원안 여부", "비교 축 가이드"])
+        with align_tab:
+            st.markdown(markdown_table(["방법", "분류", "설명"], [
+                ["TurboQuant", "Paper-aligned", "무작위 회전 뒤 좌표별 스칼라 양자화라는 큰 흐름을 따릅니다."],
+                ["PolarQuant", "Paper-aligned (직관용 단순화 포함)", "재귀 polar 변환과 angle quantization 흐름을 따르지만, 앱의 방사형 bin 그림은 직관용으로 단순화했습니다."],
+                ["QJL", "Paper-aligned", "비대칭 inner-product estimator 관점을 중심에 두고 설명합니다."],
+                ["Turbo + QJL", "Paper-aligned hybrid", "Turbo MSE base 뒤 residual에 1-bit QJL을 붙이는 논문식 2단계 구조입니다."],
+                ["Polar + QJL", "Exploratory hybrid", "비교/교육용 탐색 하이브리드이며 PolarQuant 논문의 원안은 아닙니다."],
+            ]))
+        with axis_tab:
+            st.markdown(markdown_table(["비교 축", "여기에 두는 방법", "주요 지표"], [
+                ["복원 / 구조 보존", "TurboQuant, PolarQuant", "MSE, MAE, Mean cosine, 단면 이동, 코드북 구조"],
+                ["내적 / 추정 품질", "QJL, Turbo + QJL, Polar + QJL", "IP bias, IP MAE, IP corr, true-vs-est inner product"],
+            ]))
+            st.caption("발표 때는 Turbo/Polar를 먼저 geometry 관점에서 보여주고, QJL 계열은 inner-product estimator 관점으로 분리해서 설명하면 가장 덜 헷갈립니다.")
 
 
 # -----------------------------
@@ -1161,8 +1447,12 @@ def polar_ideal_explainer(bits: int, first_bits: int, upper_bits: int) -> None:
 # -----------------------------
 
 
-if "inspect_vector_input" not in st.session_state:
-    st.session_state.inspect_vector_input = 0
+if "inspect_vector_value" not in st.session_state:
+    st.session_state.inspect_vector_value = 0
+if "inspect_vector_widget" not in st.session_state:
+    st.session_state.inspect_vector_widget = 0
+if "inspect_vector_pending" not in st.session_state:
+    st.session_state.inspect_vector_pending = None
 if "slice_pair_input" not in st.session_state:
     st.session_state.slice_pair_input = 0
 
@@ -1191,8 +1481,16 @@ with st.sidebar:
     seed = st.number_input("시드", min_value=0, max_value=999999, value=7, step=1)
     plot_points = st.slider("비교용 표시 점 수", 200, 1200, 500, step=100)
     process_points = st.slider("3D 애니메이션 점 수", 40, 220, 100, step=20)
-    st.session_state.inspect_vector_input = int(max(0, min(max(0, n_points - 1), st.session_state.get("inspect_vector_input", 0))))
-    inspect_vector = st.number_input("단면 예시 벡터 번호", min_value=0, max_value=max(0, n_points - 1), step=1, key="inspect_vector_input", help="단면 그림에서 자세히 볼 하나의 샘플 벡터 번호입니다. 3D나 구름도에서 점을 클릭해도 바뀝니다.")
+    apply_pending_inspect_vector(max(0, n_points - 1))
+    inspect_vector = st.number_input(
+        "단면 예시 벡터 번호",
+        min_value=0,
+        max_value=max(0, n_points - 1),
+        step=1,
+        key="inspect_vector_widget",
+        on_change=sync_inspect_vector_from_widget,
+        help="단면 그림에서 자세히 볼 하나의 샘플 벡터 번호입니다. 3D나 구름도에서 점을 클릭하면 즉시 이 값으로 바뀌고, 다시 다른 점을 클릭해도 덮어씁니다.",
+    )
     max_pair = max(0, dimension // 2 - 1)
     st.session_state.slice_pair_input = int(max(0, min(max_pair, st.session_state.get("slice_pair_input", 0))))
     slice_pair = st.slider("단면 좌표쌍 번호", 0, max_pair, key="slice_pair_input", help="i를 고르면 (x[2i], x[2i+1]) 좌표쌍을 2D 단면으로 봅니다.")
@@ -1276,7 +1574,7 @@ for offset, method_name, mid_state, stage1_label, stage2_label in [
         "stage2_label": stage2_label,
     }
 
-inspect_idx = int(inspect_vector)
+inspect_idx = int(st.session_state.get("inspect_vector_value", inspect_vector))
 pair_start = 2 * int(slice_pair)
 pair_end = pair_start + 2
 
@@ -1305,11 +1603,11 @@ st.markdown(f'<div class="paper-card"><strong>선택한 데이터 분포</strong
 with st.expander("논문 반영 범위 / 이 앱이 어디까지 paper-faithful 인가", expanded=False):
     st.markdown(
         """
-- **TurboQuant**: 무작위 회전 후 좌표별 스칼라 양자화를 적용하는 구조를 반영했습니다. 앱에서는 Beta형 좌표 분포에 맞춘 코드북을 **샘플 기반 Max-Lloyd 근사**로 만듭니다.
-- **PolarQuant**: 재귀적 polar 변환, 첫 레벨 `[0, 2π)`, 상위 레벨 `[0, π/2]` 구조를 반영했습니다.
-- **QJL**: 논문의 본체는 **벡터 복원**이 아니라 **비대칭 inner-product estimator**입니다.
-- **Turbo + QJL**: 먼저 MSE 양자화 후 residual에 1-bit QJL을 붙였습니다.
-- **Polar + QJL**: 비교/교육용 탐색 하이브리드입니다.
+- **TurboQuant**: 무작위 회전 후 좌표별 스칼라 양자화를 적용하는 구조를 반영했습니다. 여기서 보이는 격자형 그림은 **학습된 데이터 맵**이 아니라 **공통 scalar codebook**의 스냅 구조를 보여 주는 시각화입니다.
+- **PolarQuant**: 재귀적 polar 변환, 첫 레벨 `[0, 2π)`, 상위 레벨 `[0, π/2]` 구조를 반영했습니다. 다만 앱의 방사형 angle bin은 **직관용 단순화 그림**이며, 논문 구현은 **optimized codebook**과 **level-dependent bit allocation**을 사용합니다.
+- **QJL**: 논문의 본체는 **벡터 복원**이 아니라 **비대칭 inner-product estimator**입니다. 따라서 QJL 탭의 3D 그림은 설명용이고, 핵심 평가는 `IP bias / IP MAE / IP corr`입니다.
+- **Turbo + QJL**: 먼저 MSE 양자화 후 residual에 1-bit QJL을 붙이는 **논문 친화적 2단계 구조**입니다.
+- **Polar + QJL**: 비교/교육용 **탐색 하이브리드**이며 PolarQuant 논문의 원안은 아닙니다.
         """
     )
 
@@ -1321,9 +1619,12 @@ comparison_rows = [
     ["Polar + QJL", f"{metrics_polar_prod['MSE']:.4f}", f"{metrics_polar_prod['IP MAE']:.4f}", f"{metrics_polar_prod['IP bias']:.4f}", "비교용 하이브리드"],
 ]
 
-turbo_tab, polar_tab, qjl_tab, compare_tab = st.tabs(["TurboQuant", "PolarQuant", "QJL", "비교 / 하이브리드"])
+st.caption("지표 공식과 3D 투영 방식 설명은 아래 `지표 / 투영 해설` 탭에 정리했습니다.")
+
+turbo_tab, polar_tab, qjl_tab, compare_tab, reference_tab = st.tabs(["TurboQuant", "PolarQuant", "QJL", "비교 / 하이브리드", "지표 / 투영 해설"])
 with turbo_tab:
-    one_line_box("TurboQuant는 회전된 좌표를 공통 코드북에 스냅하는 방법입니다. Polar만 보이던 단면도도 Turbo에서 같이 볼 수 있게 정리했습니다.")
+    one_line_box("TurboQuant는 회전된 좌표를 공통 코드북에 스냅하는 방법입니다. 여기서 보이는 격자형 그림은 데이터셋별 learned map이 아니라 공통 scalar codebook 스냅을 설명하는 그림입니다.")
+    note_card("Paper note", "TurboQuant 그림은 학습된 군집 지도가 아니라 random rotation 뒤 좌표별 scalar codebook이 어떻게 작동하는지 보여 주는 직관용 구조입니다.")
     look_box([
         "3D 과정 보기에서 원본 → 회전 → 코드북 스냅 순서를 따라가 보세요.",
         "오른쪽 단면 예시에서는 선택한 좌표쌍이 실제로 어디로 이동했는지 바로 볼 수 있습니다.",
@@ -1357,11 +1658,13 @@ with turbo_tab:
             key="turbo_process_chart",
         )
         update_inspect_vector(turbo_pick, n_points - 1)
-        st.caption("3D 점을 클릭하면 오른쪽 단면 예시 벡터 번호가 그 점으로 바뀝니다.")
+        st.caption("3D 점을 클릭하면 오른쪽 단면 예시 벡터 번호가 그 점으로 바뀝니다. 환경에 따라 3D 클릭이 덜 민감하면 아래 좌표쌍 구름도 클릭은 안정적으로 동작합니다.")
     with c2:
         st.plotly_chart(histogram_with_codebook(turbo_details["rot"].reshape(-1), turbo_details["codebook"], "회전 좌표 분포와 Turbo 코드북"), width="stretch", theme=None)
         st.plotly_chart(pair_vector_compare_figure(turbo_original_pair, turbo_quant_pair, f"Turbo 단면 예시 · 벡터 {inspect_idx}, 좌표쌍 {slice_pair}"), width="stretch", theme=None)
-        st.caption(f"Turbo 단면 예시는 회전 정규화 좌표에서 보여 줍니다. 그래서 현재 3비트면 {2 ** bit_width}×{2 ** bit_width} 코드북 격자가 눈에 더 잘 보입니다.")
+        render_pair_summary("Turbo 좌표 변화 표", turbo_original_pair, turbo_quant_pair, "Turbo는 좌표별 코드북 스냅이 핵심이라, 각 좌표와 pair 길이/각도가 얼마나 바뀌는지 같이 보는 것이 좋습니다.")
+        st.caption(f"Turbo 단면 예시는 회전 정규화 좌표에서 보여 줍니다. 그래서 현재 {bit_width}비트면 {2 ** bit_width}×{2 ** bit_width} 코드북 격자가 눈에 더 잘 보입니다.")
+        render_turbo_slice_explainer()
     with st.expander("Turbo 추가 그래프", expanded=False):
         extra_left, extra_right = st.columns([1.0, 0.95])
         with extra_left:
@@ -1377,11 +1680,13 @@ with turbo_tab:
                     x_grid=turbo_details["codebook"],
                     y_grid=turbo_details["codebook"],
                     quant_name="양자화 좌표쌍 (격자 스냅)",
+                    selected_original_pair=turbo_original_pair,
+                    selected_quant_pair=turbo_quant_pair,
                 ),
                 key="turbo_pair_cloud",
             )
             update_inspect_vector(turbo_pair_pick, n_points - 1)
-            st.caption(f"세로/가로 점선이 Turbo 코드북 격자입니다. 현재 설정에서는 좌표당 {2 ** bit_width}레벨이므로 평면에서는 {2 ** bit_width}×{2 ** bit_width} 격자로 보입니다.")
+            st.caption(f"세로/가로 점선이 Turbo 코드북 격자이고, 진한 파란/빨간 선은 선택 벡터의 원본/양자화 좌표쌍입니다. 현재 설정에서는 좌표당 {2 ** bit_width}레벨이므로 평면에서는 {2 ** bit_width}×{2 ** bit_width} 격자로 보입니다.")
         with extra_right:
             turbo_ip_mask = ensure_nonempty_mask(filter_mask_from_bins(turbo_details["color_ids"], turbo_visible_bins))
             st.plotly_chart(
@@ -1420,7 +1725,8 @@ with turbo_tab:
             st.plotly_chart(histogram_with_codebook(ideal_turbo_details["rot"].reshape(-1), ideal_turbo_details["codebook"], "이상 분포의 회전 좌표와 Turbo 코드북"), width="stretch", theme=None)
 
 with polar_tab:
-    one_line_box("PolarQuant는 좌표를 반지름과 각도로 바꾼 뒤 각도를 양자화합니다. 단면 예시와 전체 구름도를 같이 보도록 유지했습니다.")
+    one_line_box("PolarQuant는 좌표를 반지름과 각도로 바꾼 뒤 각도를 양자화합니다. 앱의 방사형 bin은 각도 스냅 직관용이며, 논문 구현은 분포 기반 optimized codebook과 level-dependent bit allocation을 사용합니다.")
+    note_card("Paper note", "현재 방사형 그림은 이해를 돕기 위한 단순화 데모입니다. 논문 구현은 random preconditioning 뒤 각도 분포를 바탕으로 codebook을 만들고, 실험에서는 4-level 재귀 구조와 첫 레벨 4비트 / 이후 2비트 배분을 사용합니다.")
     look_box([
         "단면 예시에서 원본 각도 θ와 양자화 각도 θ̂를 바로 비교해 보세요.",
         "3D 과정 보기에서는 회전된 상태를 거쳐 최종 양자화점으로 이동합니다.",
@@ -1457,9 +1763,10 @@ with polar_tab:
             key="polar_process_chart",
         )
         update_inspect_vector(polar_pick, n_points - 1)
-        st.caption("3D 점을 클릭하면 오른쪽 단면 예시 벡터 번호가 그 점으로 바뀝니다.")
+        st.caption("3D 점을 클릭하면 오른쪽 단면 예시 벡터 번호가 그 점으로 바뀝니다. 환경에 따라 3D 클릭이 덜 민감하면 아래 좌표쌍 구름도 클릭은 안정적으로 동작합니다.")
     with right:
         st.plotly_chart(slice_geometry_figure(polar_original_pair, polar_quant_pair, f"Polar 단면 예시 · 벡터 {inspect_idx}, 좌표쌍 {slice_pair}"), width="stretch", theme=None)
+        render_pair_summary("Polar 좌표 / 반지름 / 각도 변화 표", polar_original_pair, polar_quant_pair, "Polar에서는 각도 스냅이 핵심이지만, 상위 레벨 조합 때문에 pair 반지름도 함께 달라질 수 있습니다.")
         polar_pair_pick = plotly_chart_pick(
             pair_cloud_figure(
                 polar_original_cloud[polar_static_mask],
@@ -1471,17 +1778,24 @@ with polar_tab:
                 selected_index=inspect_idx,
                 radial_angles=polar_details["first_codebook"],
                 quant_name="양자화 좌표쌍 (각도 스냅)",
+                selected_original_pair=polar_original_pair,
+                selected_quant_pair=polar_quant_pair,
+                radius_rings=np.array([pair_radius(polar_original_pair), pair_radius(polar_quant_pair)]),
             ),
             key="polar_pair_cloud",
         )
         update_inspect_vector(polar_pair_pick, n_points - 1)
-        st.caption(f"방사형 점선이 Polar 첫 레벨 각도 코드북입니다. 지금 설정에서는 첫 레벨 {2 ** first_bits}개 각도 bin으로 수렴합니다.")
+        st.caption(f"방사형 점선이 Polar 첫 레벨 각도 코드북이고, 동심원은 선택 벡터의 원본/양자화 후 반지름입니다. 지금 설정에서는 첫 레벨 {2 ** first_bits}개 각도 bin으로 수렴합니다.")
+        render_polar_slice_explainer()
     with st.expander("Polar 추가 그래프", expanded=False):
-        bottom_left, bottom_right = st.columns(2)
+        radius_delta = np.linalg.norm(polar_details["recon_rot"][:, pair_start:pair_end], axis=1) - np.linalg.norm(polar_details["rot"][:, pair_start:pair_end], axis=1)
+        bottom_left, bottom_mid, bottom_right = st.columns(3)
         with bottom_left:
             st.plotly_chart(error_hist(polar_details["lvl0_after"] - polar_details["lvl0_before"], "1단계 각도 양자화 오차"), width="stretch", theme=None)
-        with bottom_right:
+        with bottom_mid:
             st.plotly_chart(error_hist(polar_details["lvllast_after"] - polar_details["lvllast_before"], "깊은 단계 각도 양자화 오차", color=BLUE), width="stretch", theme=None)
+        with bottom_right:
+            st.plotly_chart(error_hist(radius_delta, "선택 좌표쌍 반지름 변화", color="#0f766e"), width="stretch", theme=None)
         polar_ip_mask = ensure_nonempty_mask(filter_mask_from_bins(polar_details["color_ids"], polar_visible_bins))
         st.plotly_chart(
             scatter_true_vs_est(
@@ -1519,7 +1833,8 @@ with polar_tab:
             st.plotly_chart(error_hist(ideal_polar_details["lvl0_after"] - ideal_polar_details["lvl0_before"], "이상 분포의 1단계 각도 양자화 오차", color=BLUE), width="stretch", theme=None)
 
 with qjl_tab:
-    one_line_box("QJL의 핵심은 벡터 복원보다 내적 추정입니다. 다만 직관을 위해 3D 설명용 과정 보기와 함께 배치했습니다.")
+    one_line_box("QJL의 핵심은 3D 벡터 복원이 아니라 asymmetric inner-product estimation입니다. 이 탭의 3D 과정은 JL 투영과 sign sketch 흐름을 보여 주는 설명용 그림입니다.")
+    note_card("중요", "QJL은 Turbo/Polar처럼 복원형 quantizer로 읽기보다, query에는 JL transform을 적용하고 key는 sign-bit sketch와 norm만 저장해 inner product를 추정하는 방법으로 읽는 편이 논문 취지에 맞습니다.")
     look_box([
         "왼쪽 3D는 설명용 과정 보기입니다. Play를 누르면 원본에서 다시 시작하고, 기본 화면은 마지막 단계로 보이게 했습니다.",
         "오른쪽 산점도가 y=x에 가까울수록 내적 추정이 잘 되는 것입니다.",
@@ -1530,6 +1845,7 @@ with qjl_tab:
     qjl_corr = float(np.corrcoef(true_ip, est_ip_qjl)[0, 1]) if np.std(est_ip_qjl) > EPS and np.std(true_ip) > EPS else 1.0
     qjl_metrics = {"IP bias": qjl_bias, "IP MAE": qjl_mae, "IP corr": qjl_corr, "스케치 차원 m": float(m_qjl), "‖q‖ 평균": float(np.linalg.norm(q)), "‖k‖ 평균": float(np.mean(qjl_details["norms"]))}
     metric_cards(qjl_metrics, accents=["red", "blue", "blue", "blue", "red", "blue"])
+    render_qjl_core_explainer()
     left, right = st.columns([1.15, 0.95])
     with left:
         data = process_registry["QJL"]
@@ -1547,38 +1863,110 @@ with qjl_tab:
             st.plotly_chart(scatter_true_vs_est(true_ip, est_ip_turbo_prod, "참고: Turbo + QJL 실제 vs 복원 내적", point_colors=color_array_from_ids(turbo_prod_details["color_ids"], levels)), width="stretch", theme=None)
 
 with compare_tab:
-    one_line_box("같은 원본 점이 Turbo 계열과 Polar 계열에서 어떻게 이동하고, residual QJL이 내적 오차를 얼마나 줄이는지 바로 비교할 수 있습니다.")
+    one_line_box("비교 탭은 축을 둘로 나눴습니다. Turbo/Polar는 복원·구조 보존 관점, QJL 계열은 inner-product estimation 관점으로 보면 논문 취지와 가장 가깝습니다.")
+    render_alignment_reference()
+    compare_geom_tab, compare_ip_tab, compare_hybrid_tab = st.tabs(["복원 / 구조 비교", "내적 / 추정 비교", "하이브리드 메모"])
+    with compare_geom_tab:
+        look_box([
+            "Turbo와 Polar는 먼저 복원·구조 보존 축으로 비교하는 편이 자연스럽습니다.",
+            "Turbo는 격자형 스냅, Polar는 각도형 스냅이라는 차이를 눈으로 먼저 보여 주세요.",
+            "QJL은 이 축에서 보조로만 언급하고, 본격 비교는 다음 탭에서 하는 편이 덜 헷갈립니다.",
+        ])
+        st.markdown(markdown_table(["방법", "MSE", "MAE", "Mean cosine", "메인 포인트"], [
+            ["TurboQuant", f"{metrics_turbo['MSE']:.4f}", f"{metrics_turbo['MAE']:.4f}", f"{metrics_turbo['Mean cosine']:.4f}", "공통 scalar codebook / 격자형 스냅"],
+            ["PolarQuant", f"{metrics_polar['MSE']:.4f}", f"{metrics_polar['MAE']:.4f}", f"{metrics_polar['Mean cosine']:.4f}", "recursive polar / 각도형 스냅"],
+        ]))
+        compare_method = st.selectbox("복원 비교용 3D 방법", ["TurboQuant", "PolarQuant"], index=0)
+        left, right = st.columns([1.15, 0.95])
+        with left:
+            data = process_registry[compare_method]
+            compare_pick = plotly_chart_pick(process_figure_3d(data["orig"], data["mid"], data["final"], data["color_ids"], f"{compare_method} 3D 과정", levels, stage1_label=data["stage1_label"], stage2_label=data["stage2_label"], point_indices=process_idx, selected_index=inspect_idx), key="compare_geom_process_chart")
+            update_inspect_vector(compare_pick, n_points - 1)
+            st.caption("복원 비교 탭에서도 점을 클릭하면 공통 단면 예시 벡터 번호가 업데이트됩니다.")
+        with right:
+            if compare_method == "TurboQuant":
+                st.plotly_chart(pair_cloud_figure(
+                    turbo_original_cloud,
+                    turbo_quant_cloud,
+                    f"Turbo 좌표쌍 구름도 · 좌표쌍 {slice_pair}",
+                    color_ids=turbo_details["color_ids"][static_idx],
+                    levels=levels,
+                    point_indices=static_idx,
+                    selected_index=inspect_idx,
+                    x_grid=turbo_details["codebook"],
+                    y_grid=turbo_details["codebook"],
+                    quant_name="양자화 좌표쌍 (격자 스냅)",
+                    selected_original_pair=turbo_original_pair,
+                    selected_quant_pair=turbo_quant_pair,
+                ), width="stretch", theme=None)
+            else:
+                st.plotly_chart(pair_cloud_figure(
+                    polar_original_cloud,
+                    polar_quant_cloud,
+                    f"Polar 좌표쌍 구름도 · 좌표쌍 {slice_pair}",
+                    color_ids=polar_details["color_ids"][static_idx],
+                    levels=levels,
+                    point_indices=static_idx,
+                    selected_index=inspect_idx,
+                    radial_angles=polar_details["first_codebook"],
+                    quant_name="양자화 좌표쌍 (각도 스냅)",
+                    selected_original_pair=polar_original_pair,
+                    selected_quant_pair=polar_quant_pair,
+                    radius_rings=np.array([pair_radius(polar_original_pair), pair_radius(polar_quant_pair)]),
+                ), width="stretch", theme=None)
+    with compare_ip_tab:
+        look_box([
+            "QJL 계열은 복원보다 true vs estimated inner product, bias, correlation으로 읽는 편이 정확합니다.",
+            "Turbo + QJL은 논문 친화적 하이브리드이고, Polar + QJL은 비교용 탐색 하이브리드입니다.",
+            "y=x에 가까울수록 내적 추정이 잘 된다고 설명하면 발표에서 이해가 빠릅니다.",
+        ])
+        st.markdown(markdown_table(["방법", "IP MAE", "IP bias", "IP corr", "위치"], [
+            ["QJL", f"{qjl_mae:.4f}", f"{qjl_bias:.4f}", f"{qjl_corr:.4f}", "Inner-product estimator 본체"],
+            ["Turbo + QJL", f"{metrics_turbo_prod['IP MAE']:.4f}", f"{metrics_turbo_prod['IP bias']:.4f}", f"{metrics_turbo_prod['IP corr']:.4f}", "Paper-aligned hybrid"],
+            ["Polar + QJL", f"{metrics_polar_prod['IP MAE']:.4f}", f"{metrics_polar_prod['IP bias']:.4f}", f"{metrics_polar_prod['IP corr']:.4f}", "Exploratory hybrid"],
+        ]))
+        left, right = st.columns([1.0, 1.0])
+        with left:
+            fig_multi = go.Figure()
+            fig_multi.add_trace(go.Scatter(x=true_ip, y=est_ip_qjl, mode="markers", name="QJL", marker=dict(size=5, opacity=0.65, color="#0f766e")))
+            fig_multi.add_trace(go.Scatter(x=true_ip, y=est_ip_turbo_prod, mode="markers", name="Turbo+QJL", marker=dict(size=5, opacity=0.72, color="#1d4ed8")))
+            fig_multi.add_trace(go.Scatter(x=true_ip, y=est_ip_polar_prod, mode="markers", name="Polar+QJL", marker=dict(size=5, opacity=0.72, color="#b91c1c")))
+            lo = float(min(true_ip.min(), est_ip_qjl.min(), est_ip_turbo_prod.min(), est_ip_polar_prod.min()))
+            hi = float(max(true_ip.max(), est_ip_qjl.max(), est_ip_turbo_prod.max(), est_ip_polar_prod.max()))
+            fig_multi.add_trace(go.Scatter(x=[lo, hi], y=[lo, hi], mode="lines", name="이상적인 y=x", line=dict(color="#64748b", dash="dash")))
+            fig_multi.update_layout(template="plotly_white", title=dict(text="내적 추정 비교: QJL 계열", font=dict(color="black")), height=450, margin=dict(l=10, r=10, t=40, b=10), xaxis_title="실제 내적", yaxis_title="추정 내적", plot_bgcolor="white", paper_bgcolor="white", font=dict(color="black"))
+            st.plotly_chart(fig_multi, width="stretch", theme=None)
+        with right:
+            compare_ip_method = st.selectbox("내적 비교용 3D 방법", ["QJL", "Turbo + QJL", "Polar + QJL"], index=1)
+            data = process_registry[compare_ip_method]
+            compare_ip_pick = plotly_chart_pick(process_figure_3d(data["orig"], data["mid"], data["final"], data["color_ids"], f"{compare_ip_method} 3D 과정", levels, stage1_label=data["stage1_label"], stage2_label=data["stage2_label"], point_indices=process_idx, selected_index=inspect_idx), key="compare_ip_process_chart")
+            update_inspect_vector(compare_ip_pick, n_points - 1)
+            st.caption("이 3D 그림은 QJL 계열의 흐름을 설명하는 보조 시각화입니다. 핵심 평가는 왼쪽 내적 추정 그래프입니다.")
+        with st.expander("내적 비교 추가 그래프", expanded=False):
+            bottom_left, bottom_mid, bottom_right = st.columns(3)
+            with bottom_left:
+                st.plotly_chart(error_hist(est_ip_qjl - true_ip, "QJL 내적 오차", color="#0f766e"), width="stretch", theme=None)
+            with bottom_mid:
+                st.plotly_chart(error_hist(est_ip_turbo_prod - true_ip, "Turbo + QJL 내적 오차", color=BLUE), width="stretch", theme=None)
+            with bottom_right:
+                st.plotly_chart(error_hist(est_ip_polar_prod - true_ip, "Polar + QJL 내적 오차", color=RED), width="stretch", theme=None)
+    with compare_hybrid_tab:
+        note_card("하이브리드 읽는 법", "Turbo + QJL은 논문 친화적 2단계 구조이고, Polar + QJL은 발표/비교를 위한 탐색 하이브리드입니다.")
+        pipeline_box("하이브리드 비교", [("Base quantizer", "Turbo 또는 Polar base를 먼저 적용합니다."), ("Residual", "원본 - base 복원값 차이를 residual로 봅니다."), ("Residual QJL", "residual에 sign sketch를 적용합니다."), ("Final merge", "base 복원 + residual_hat 을 합쳐 최종점을 만듭니다.")])
+        st.markdown(markdown_table(["방법", "분류", "발표할 때 이렇게 말하기"], [
+            ["Turbo + QJL", "Paper-aligned hybrid", "Turbo MSE base가 구조를 먼저 잡고, residual만 1-bit QJL로 보정한다고 설명하면 됩니다."],
+            ["Polar + QJL", "Exploratory hybrid", "PolarQuant 논문 원안은 아니고, base quantizer를 바꿨을 때 inner-product 품질이 어떻게 달라지는지 보는 비교용이라고 말하면 안전합니다."],
+        ]))
+
+with reference_tab:
+    one_line_box("이 탭은 발표 때 자주 나오는 질문인 ‘이 지표가 뭔가요?’와 ‘3D 투영 방식은 왜 다르죠?’를 한곳에 모은 해설 탭입니다.")
     look_box([
-        "왼쪽은 선택한 방법의 3D 과정, 오른쪽은 여러 방법의 내적 비교입니다.",
-        "필요한 보조 그래프만 아래 expander에 남겨 한 화면 복잡도를 줄였습니다.",
-        "Turbo와 Polar의 차이는 base quantizer, QJL은 residual 보정 역할로 이해하면 됩니다.",
+        "지표 설명 expander에서는 각 카드 점수의 공식, 의미, 좋은 방향을 한 번에 볼 수 있습니다.",
+        "투영 방식 expander에서는 Random projection / PCA / First 3 coordinates가 화면에 어떤 차이를 만드는지 바로 비교할 수 있습니다.",
+        "여기서의 투영 방식은 시각화 도구이며, 양자화 알고리즘 자체와는 구분해서 보는 것이 좋습니다.",
     ])
-    pipeline_box("하이브리드 비교", [("Base quantizer", "Turbo 또는 Polar base를 먼저 적용합니다."), ("Residual", "원본 - base 복원값 차이를 residual로 봅니다."), ("Residual QJL", "residual에 sign sketch를 적용합니다."), ("Final merge", "base 복원 + residual_hat 을 합쳐 최종점을 만듭니다.")])
-    st.markdown(markdown_table(["방법", "MSE", "IP MAE", "IP bias", "역할"], comparison_rows))
-    compare_method = st.selectbox("비교용 3D 방법", ["TurboQuant", "PolarQuant", "Turbo + QJL", "Polar + QJL"], index=2)
-    left, right = st.columns([1.15, 0.95])
-    with left:
-        data = process_registry[compare_method]
-        compare_pick = plotly_chart_pick(process_figure_3d(data["orig"], data["mid"], data["final"], data["color_ids"], f"{compare_method} 3D 과정", levels, stage1_label=data["stage1_label"], stage2_label=data["stage2_label"], point_indices=process_idx, selected_index=inspect_idx), key="compare_process_chart")
-        update_inspect_vector(compare_pick, n_points - 1)
-        st.caption("비교 탭에서도 점을 클릭하면 공통 단면 예시 벡터 번호가 업데이트됩니다.")
-    with right:
-        fig_multi = go.Figure()
-        fig_multi.add_trace(go.Scatter(x=true_ip, y=est_ip_turbo, mode="markers", name="Turbo", marker=dict(size=4, opacity=0.35, color=BLUE)))
-        fig_multi.add_trace(go.Scatter(x=true_ip, y=est_ip_polar, mode="markers", name="Polar", marker=dict(size=4, opacity=0.35, color=RED)))
-        fig_multi.add_trace(go.Scatter(x=true_ip, y=est_ip_turbo_prod, mode="markers", name="Turbo+QJL", marker=dict(size=5, opacity=0.72, color="#1d4ed8")))
-        fig_multi.add_trace(go.Scatter(x=true_ip, y=est_ip_polar_prod, mode="markers", name="Polar+QJL", marker=dict(size=5, opacity=0.72, color="#b91c1c")))
-        lo = float(min(true_ip.min(), est_ip_turbo.min(), est_ip_polar.min(), est_ip_turbo_prod.min(), est_ip_polar_prod.min()))
-        hi = float(max(true_ip.max(), est_ip_turbo.max(), est_ip_polar.max(), est_ip_turbo_prod.max(), est_ip_polar_prod.max()))
-        fig_multi.add_trace(go.Scatter(x=[lo, hi], y=[lo, hi], mode="lines", name="이상적인 y=x", line=dict(color="#64748b", dash="dash")))
-        fig_multi.update_layout(template="plotly_white", title=dict(text="방법별 실제 vs 추정 내적", font=dict(color="black")), height=450, margin=dict(l=10, r=10, t=40, b=10), xaxis_title="실제 내적", yaxis_title="추정 / 복원 내적", plot_bgcolor="white", paper_bgcolor="white", font=dict(color="black"))
-        st.plotly_chart(fig_multi, width="stretch", theme=None)
-    with st.expander("비교 탭 추가 그래프", expanded=False):
-        bottom_left, bottom_right = st.columns(2)
-        with bottom_left:
-            st.plotly_chart(error_hist(est_ip_turbo_prod - true_ip, "Turbo + QJL 내적 오차", color=BLUE), width="stretch", theme=None)
-        with bottom_right:
-            st.plotly_chart(error_hist(est_ip_polar_prod - true_ip, "Polar + QJL 내적 오차", color=RED), width="stretch", theme=None)
+    render_metric_reference()
+    render_projection_reference(x[static_idx], x_turbo[static_idx], turbo_details["color_ids"][static_idx], levels, int(seed))
 
 st.markdown("---")
 st.markdown("**요약:** TurboQuant는 좌표 스냅, PolarQuant는 각도 스냅, QJL은 1-bit 내적 스케치, Turbo+QJL은 논문식 하이브리드, Polar+QJL은 비교용 탐색 하이브리드로 이해하면 됩니다.")
