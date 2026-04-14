@@ -1,35 +1,131 @@
-# TurboQuant · PolarQuant · QJL Interactive Visualizer
+# TurboQuant · PolarQuant · QJL 인터랙티브 시각화 데모
 
-TurboQuant, PolarQuant, QJL의 핵심 아이디어를 **직접 보고 비교할 수 있게 만든 Streamlit 시각화 데모**입니다.
+이 저장소는 **TurboQuant**, **PolarQuant**, **QJL**, 그리고 비교 기준이 되는 **기존 Cartesian 양자화 baseline**을 한 화면에서 직접 보고 설명할 수 있게 만든 **Streamlit 기반 시각화 데모**입니다.
 
-이 프로젝트는 논문 전체 실험을 완전히 재현하는 저장소가 아니라,
-- 각 방법이 무엇을 보존하려는지,
-- 양자화 전후에 좌표·각도·반지름·내적이 어떻게 바뀌는지,
-- 어떤 부분은 논문 원안에 가깝고 어떤 부분은 발표용 단순화인지
-를 **직관적으로 설명하는 것**에 초점을 둡니다.
+핵심 목적은 논문 수식을 그대로 복사해 두는 것이 아니라,
 
-## 이 레포가 보여 주는 것
+- 각 방법이 **무엇을 보존하려는지**
+- 양자화 전후에 **좌표, 각도, 반지름, inner product, attention score**가 어떻게 달라지는지
+- 어떤 그림은 **논문에 가까운 표현**이고 어떤 그림은 **설명을 위한 단순화**인지
+
+를 발표나 학습 문맥에서 **직관적으로 이해할 수 있게 보여 주는 것**입니다.
+
+---
+
+## 이 레포가 보여주고 싶은 것
+
+이 앱은 아래 질문에 답하기 위해 만들어졌습니다.
+
+### 1) 그냥 좌표를 바로 양자화하면 어떤 왜곡이 생기나?
+기존 양자화 baseline 탭에서 **Cartesian uniform quantization**이 만드는 격자형 스냅을 먼저 보여 줍니다.
+
+### 2) TurboQuant는 왜 회전을 먼저 보나?
+TurboQuant 탭에서 **회전 후 좌표별 scalar quantization**이 어떤 구조를 만드는지 보여 줍니다.
+
+### 3) PolarQuant는 왜 각도 관점이 중요한가?
+PolarQuant 탭에서 **polar 표현, 각도 스냅, 반지름 변화**를 함께 보여 줍니다.
+
+### 4) QJL은 왜 복원보다 inner-product estimation으로 읽어야 하나?
+QJL 탭에서 **sign sketch**, **scaled sketch**, **true vs estimated inner product**, **attention score proxy**를 먼저 보이도록 구성했습니다.
+
+즉, 이 저장소의 중심은 “누가 더 예쁘게 복원되나”만 보는 것이 아니라,
+**방법마다 보존하려는 정보가 다르다**는 점을 시각적으로 설명하는 데 있습니다.
+
+---
+
+## 포함된 구성
+
+현재 앱은 다음 흐름으로 구성되어 있습니다.
+
+### 1. 기존 양자화
+- 원래 좌표계에서 바로 적용하는 **uniform scalar quantization**
+- 공통 격자 코드북 위로 점이 어떻게 붙는지 확인
+- Turbo / Polar / QJL과 비교하기 위한 기준선
+
+### 2. TurboQuant
+- 무작위 회전 후 좌표별 quantization
+- 회전 좌표 공간에서의 **격자형 스냅**
+- 복원 전후 구조 변화와 내적 변화 비교
+
+### 3. PolarQuant
+- polar 표현으로 바꾼 뒤 angle 중심 양자화
+- 좌표쌍 단면에서 보이는 **방사형 구조**
+- 각도와 반지름이 어떻게 달라지는지 확인
+
+### 4. QJL
+- `Sk → sign(Sk) → scaled sketch` 흐름
+- **비대칭 inner-product estimator** 관점 설명
+- true / estimated inner product와 attention score proxy 비교
+- 3D 그림은 보조 설명용 surrogate visualization
+
+### 5. 비교 / 하이브리드
+- **복원 / 구조 보존 축**과 **내적 / 추정 축**을 분리해서 비교
+- `Turbo + QJL`, `Polar + QJL` 하이브리드 포함
+- 어떤 방법을 어떤 관점으로 읽어야 하는지 정리
+
+### 6. 지표 / 투영 해설
+- MSE, MAE, cosine, IP bias, IP MAE, IP corr, score TV 등의 의미 설명
+- Random projection / PCA / First 3 coordinates 차이 설명
+
+---
+
+## 화면을 읽는 법
+
+### 색상
+- **회색 점/회색 벡터**: 원본 기준
+- **색이 있는 점**: 양자화 후의 색상 그룹
+- 같은 색 점은 같은 양자화 그룹으로 묶여 읽으면 됩니다.
+
+앱에서는 `001`, `010` 같은 비트 문자열보다 **색상 그룹 중심**으로 보이도록 정리했습니다.
+
+### 3D 과정 보기
+- 원본 → 중간 단계 → 최종 단계 흐름을 애니메이션으로 봅니다.
+- 점을 클릭하면 **단면 예시 벡터 번호**가 같이 바뀝니다.
+
+### 좌표쌍 구름도 / 단면 예시
+- `(x[2i], x[2i+1])` 형태의 2D 좌표쌍을 확대해서 보여 줍니다.
+- Turbo는 격자형 스냅,
+- Polar는 각도형 스냅,
+- baseline은 원래 좌표계에서의 직접 스냅,
+- QJL은 복원보다 inner product 관련 그림을 중심으로 읽는 것이 좋습니다.
+
+---
+
+## 이 저장소의 성격
+
+이 프로젝트는 아래 성격에 가깝습니다.
+
+- **논문 발표용 visual explainer**
+- **paper-aligned demo**
+- **개념 비교용 인터랙티브 도구**
+
+반대로 아래와는 조금 다릅니다.
+
+- 논문 전체 실험을 완전히 재현하는 대규모 reproduction repo
+- 실제 학습된 코드북과 모든 최적화 루프를 그대로 구현한 production repo
+
+---
+
+## 논문과의 거리에서 꼭 알아둘 점
 
 ### TurboQuant
-- 무작위 회전 뒤 좌표별 scalar quantization
-- 좌표쌍 단면에서 보이는 **격자형 코드북 스냅**
-- 회전 좌표 분포와 코드북 중심 비교
+앱은 **회전 후 좌표별 scalar quantization**이라는 핵심 직관을 보여 주는 데 집중합니다.
 
 ### PolarQuant
-- random preconditioning 뒤 recursive polar transform
-- 각도(angle) 중심 양자화
-- 좌표쌍 단면에서 보이는 **방사형 코드북 구조**
-- 각도와 반지름이 양자화 후 어떻게 달라지는지
+앱의 방사형 그림은 이해를 돕기 위한 시각화입니다. 실제 논문 구현은 단순 균일 각도 분할만을 그대로 쓰는 그림이라기보다,
+**preconditioning 뒤 angle distribution 기반 optimized codebook**과
+**level-dependent bit allocation** 관점으로 읽는 편이 더 정확합니다.
 
 ### QJL
-- 복원형 양자화기보다 **asymmetric inner-product estimator**로서의 QJL
-- query는 JL transform, key는 sign-bit sketch + norm 저장
-- true vs estimated inner product, bias, MAE, correlation 비교
+QJL의 본체는 벡터 복원기가 아니라 **sign sketch 기반 inner-product estimator**입니다.
+따라서 이 앱의 QJL 3D 그림은 설명 보조용이고,
+핵심 평가는 **inner product / attention score proxy** 쪽입니다.
 
-### Hybrid / 비교
-- Turbo + QJL: 논문 친화적 2단계 하이브리드
-- Polar + QJL: 비교/교육용 탐색 하이브리드
-- 복원 / 구조 보존 축과 내적 / 추정 품질 축을 분리해서 비교
+### Hybrid
+- **Turbo + QJL**: 논문 친화적인 2단계 설명용 하이브리드
+- **Polar + QJL**: 비교/탐색용 하이브리드
+
+---
 
 ## 실행 방법
 
@@ -38,151 +134,24 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
-## 탭 구성
+테스트 실행:
 
-### 1) TurboQuant
-TurboQuant의 회전 → 좌표 스냅 → 복원 흐름을 보여 줍니다.
+```bash
+python -m unittest discover -s tests -v
+```
 
-주로 보면 좋은 것:
-- 3D 과정 보기
-- 회전 좌표 분포와 Turbo 코드북 히스토그램
-- Turbo 단면 예시와 좌표 변화 표
-- Turbo 좌표쌍 구름도와 격자 코드북
+---
 
-### 2) PolarQuant
-PolarQuant의 각도 스냅 직관을 보여 줍니다.
+## 이 앱이 적합한 사용 장면
 
-주로 보면 좋은 것:
-- 3D 과정 보기
-- Polar 단면 예시
-- Polar 좌표 / 반지름 / 각도 변화 표
-- 방사형 각도 코드북과 반지름 동심원
-- 1단계 / 깊은 단계 각도 오차, 반지름 변화
+- 논문 스터디에서 방법별 차이를 설명할 때
+- 발표 자료용 그림을 직접 조작해 보며 설명 포인트를 잡을 때
+- TurboQuant / PolarQuant / QJL을 한 프로젝트 안에서 비교해 보고 싶을 때
+- “복원 품질”과 “inner-product estimation 품질”을 분리해서 설명하고 싶을 때
 
-### 3) QJL
-QJL을 **내적 추정기** 관점으로 설명하는 탭입니다.
+---
 
-주로 보면 좋은 것:
-- QJL 3D 과정(설명용)
-- true vs estimated inner product 산점도
-- QJL 오차 히스토그램
-- QJL 핵심 구조 / 공식 / 발표용 해석 expander
+## 한 줄 요약
 
-### 4) 비교 / 하이브리드
-비교 축을 둘로 나눠서 보여 줍니다.
-
-- **복원 / 구조 비교**: TurboQuant, PolarQuant
-- **내적 / 추정 비교**: QJL, Turbo + QJL, Polar + QJL
-- **하이브리드 메모**: 논문 원안 여부와 발표용 설명 정리
-
-### 5) 지표 / 투영 해설
-앱 안에 나오는 점수와 3D 투영 방식을 설명합니다.
-
-- MSE, MAE, Mean cosine
-- IP bias, IP MAE, IP corr
-- Random projection / PCA / First 3 coordinates 차이
-
-## 주요 설정 설명
-
-### 앱 모드
-- **Balanced**: 시각 설명과 직관을 우선
-- **Paper-faithful**: 논문 관점 설명을 조금 더 강조
-
-### 벡터 수
-시연에 사용할 샘플 개수입니다.
-
-### 차원 d
-벡터 차원입니다. 실제 내부 계산 차원이 바뀝니다.
-
-### 데이터 분포
-현재 앱에 들어 있는 옵션은 다음과 같습니다.
-- `Gaussian`
-- `Gaussian + outliers`
-- `Unit sphere`
-- `Sphere shell + outliers`
-- `Ball + outliers`
-
-이 분포들은 실제 데이터셋 자체라기보다,
-각 방법이 어떤 기하 구조에서 어떻게 보이는지 설명하기 위한 **시연용 입력 분포**입니다.
-
-### 입력 정밀도 시뮬레이션
-입력값을 `fp16-like`, `fp8-like`, `int8-like`처럼 거칠게 만드는 옵션입니다.
-
-### 양자화 비트 수
-코드북이 얼마나 촘촘한지 보는 기준 비트 수입니다.
-
-### 랜덤 전처리 적용
-random rotation / preconditioning 효과를 켜거나 끄는 옵션입니다.
-
-### 3D 공통 투영 방식
-- **Random projection**: 논문 분위기에 가장 가까운 설명용 투영
-- **PCA**: 발표에서 가장 보기 쉬운 투영
-- **First 3 coordinates**: 축 의미를 직접 설명하기 쉬운 투영
-
-### 단면 예시 벡터 번호
-한 개 샘플 벡터를 골라 단면 예시에서 자세히 봅니다.
-일부 탭에서는 3D 점이나 구름도 점을 눌러 이 번호를 바꿀 수 있습니다.
-
-### 단면 좌표쌍 번호
-`(x[2i], x[2i+1])` 형태의 2D 단면을 고릅니다.
-
-## 도표 읽는 법
-
-### 3D 과정 보기
-원본 → 중간 단계 → 최종 단계로 이동하는 흐름을 보여 줍니다.
-
-- 연한 점: 기준 상태 / 이전 단계
-- 진한 점: 현재 단계 / 최종 상태
-- 같은 색: 같은 양자화 bin 또는 비슷한 코드북 영역
-
-### 단면 예시
-하나의 벡터를 2D 좌표쌍 기준으로 확대해서 보여 줍니다.
-
-- 파란 벡터: 원본
-- 빨간 벡터: 양자화 후
-- 보조선 / 원호 / 동심원: 이동량, 각도 변화, 반지름 변화
-
-### 좌표쌍 구름도
-전체 샘플을 특정 좌표쌍 평면에서 보여 줍니다.
-
-- Turbo: 격자형 코드북이 잘 보이는지 확인
-- Polar: 방사형 각도 코드북과 반지름 구조를 확인
-
-### 내적 비교 산점도
-점들이 `y = x`에 가까울수록 내적 추정이 잘 된다는 뜻입니다.
-
-## 논문과의 관계
-
-### TurboQuant
-큰 흐름은 논문과 잘 맞습니다.
-다만 앱의 격자 그림은 **학습된 클러스터 맵**이 아니라,
-random rotation 뒤 **공통 scalar codebook**이 작동하는 모습을 직관적으로 보여 주는 그림입니다.
-
-### PolarQuant
-재귀 polar 변환과 angle quantization 흐름은 논문 취지를 따릅니다.
-다만 현재 앱의 방사형 각도 bin 그림은 **직관용 단순화 데모**이고,
-논문 구현은 preconditioning 뒤 각도 분포를 바탕으로 **optimized codebook**과
-**level-dependent bit allocation**을 사용합니다.
-
-### QJL
-QJL의 핵심은 3D 복원이 아니라 **비대칭 inner-product estimation**입니다.
-따라서 QJL 탭의 핵심 그래프는 복원 오차보다
-`IP bias`, `IP MAE`, `IP corr`, `true vs estimated inner product`입니다.
-
-### Hybrid
-- **Turbo + QJL**: 논문 친화적 하이브리드
-- **Polar + QJL**: 비교/교육용 탐색 하이브리드
-
-## 발표 때 짧게 설명하는 법
-
-- **TurboQuant**: “회전 후 좌표별 스칼라 코드북으로 스냅합니다.”
-- **PolarQuant**: “polar 좌표로 바꾼 뒤 각도를 중심으로 양자화합니다.”
-- **QJL**: “벡터를 복원하는 방법이라기보다, key를 1-bit sketch로 저장해서 inner product를 추정합니다.”
-- **Turbo + QJL**: “Turbo base로 구조를 잡고 residual만 QJL로 보정합니다.”
-- **Polar + QJL**: “논문 원안은 아니고 비교용 탐색 하이브리드입니다.”
-
-## 주의
-
-- 이 앱은 **연구/발표/학습용 시각화 도구**입니다.
-- 일부 그림은 이해를 돕기 위한 단순화가 포함됩니다.
-- 특히 Polar의 방사형 bin과 QJL의 3D 복원 그림은 **설명용 직관 시각화**로 보는 편이 정확합니다.
+이 저장소는 **TurboQuant, PolarQuant, QJL이 각각 어떤 정보를 보존하려 하는지**를,
+기존 양자화 baseline까지 포함해 **직접 보고 비교할 수 있게 만든 시각화 설명용 데모**입니다.
