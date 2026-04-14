@@ -42,12 +42,53 @@ class StreamlitUISmokeTests(unittest.TestCase):
         self.assertEqual(at.session_state["inspect_vector_value"], 7)
         self.assertEqual(at.session_state["inspect_vector_widget"], 7)
 
+    def test_dimension_number_input_accepts_new_min_and_exposes_max_bound(self):
+        at = self.make_app()
+        at.run(timeout=180)
+        dim_input = next(widget for widget in at.number_input if widget.label == "차원 d")
+        self.assertEqual(int(dim_input.min), 3)
+        self.assertEqual(int(dim_input.max), 4096)
+
+        sliders = {widget.label: widget for widget in at.slider}
+        sliders["벡터 수"].set_value(300)
+        sliders["비교용 표시 점 수"].set_value(200)
+        sliders["3D 애니메이션 점 수"].set_value(40)
+        dim_input.set_value(3)
+        at.run(timeout=180)
+        self.assertEqual(len(at.exception), 0)
+        self.assertEqual(next(widget for widget in at.number_input if widget.label == "차원 d").value, 3)
+
+
+    def test_dimension_change_preserves_other_sidebar_conditions(self):
+        at = self.make_app()
+        at.run(timeout=180)
+        distribution = next(widget for widget in at.selectbox if widget.label == "데이터 분포")
+        projection = next(widget for widget in at.selectbox if widget.label == "3D 공통 투영 방식")
+        precision = next(widget for widget in at.selectbox if widget.label == "입력 정밀도 시뮬레이션")
+        distribution.set_value("Unit sphere")
+        projection.set_value("PCA")
+        precision.set_value("fp8-like")
+        at.run(timeout=180)
+        dim_input = next(widget for widget in at.number_input if widget.label == "차원 d")
+        dim_input.set_value(8)
+        at.run(timeout=180)
+        self.assertEqual(next(widget for widget in at.selectbox if widget.label == "데이터 분포").value, "Unit sphere")
+        self.assertEqual(next(widget for widget in at.selectbox if widget.label == "3D 공통 투영 방식").value, "PCA")
+        self.assertEqual(next(widget for widget in at.selectbox if widget.label == "입력 정밀도 시뮬레이션").value, "fp8-like")
+
     def test_qjl_sign_sketch_copy_is_visible(self):
         at = self.make_app()
         at.run(timeout=180)
         markdown_text = "\n".join(getattr(node, "value", "") for node in at.markdown)
         self.assertIn("QJL = 1-bit sign sketch for inner-product estimation", markdown_text)
 
+
+    def test_source_contains_reconstruction_stage_copy_for_mse_and_prod(self):
+        source = APP_PATH.read_text(encoding="utf-8")
+        self.assertIn("코드북 스냅", source)
+        self.assertIn("최종 복원", source)
+        self.assertIn("base reconstruction", source)
+        self.assertIn("잔차 보정", source)
 
 if __name__ == "__main__":
     unittest.main()

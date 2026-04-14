@@ -17,6 +17,8 @@ RED_LIGHT = "#fef2f2"
 GRAY_LIGHT = "#f8fafc"
 DARK = "#0f172a"
 ORIGINAL_POINT_COLOR = "#9ca3af"
+ORIGINAL_REFERENCE_COLOR = RED
+FINAL_REFERENCE_COLOR = BLUE
 ORIGINAL_VECTOR_COLOR = "#475569"
 QJL_POSITIVE_COLOR = "#14b8a6"
 QJL_NEGATIVE_COLOR = "#f97316"
@@ -517,6 +519,43 @@ def random_orthogonal(d: int, seed: int) -> np.ndarray:
     return q
 
 
+def build_preconditioner(d: int, seed: int) -> Any:
+    if d <= 256:
+        return random_orthogonal(d, seed)
+    rng = np.random.default_rng(seed)
+    perm = rng.permutation(d)
+    signs = rng.choice(np.array([-1.0, 1.0]), size=d)
+    return {"kind": "signed_permutation", "perm": perm, "signs": signs}
+
+
+def apply_preconditioner_rows(x: np.ndarray, preconditioner: Any) -> np.ndarray:
+    if isinstance(preconditioner, np.ndarray):
+        return x @ preconditioner.T
+    perm = np.asarray(preconditioner["perm"], dtype=int)
+    signs = np.asarray(preconditioner["signs"], dtype=float)
+    return x[:, perm] * signs[None, :]
+
+
+def invert_preconditioner_rows(x: np.ndarray, preconditioner: Any) -> np.ndarray:
+    if isinstance(preconditioner, np.ndarray):
+        return x @ preconditioner
+    perm = np.asarray(preconditioner["perm"], dtype=int)
+    signs = np.asarray(preconditioner["signs"], dtype=float)
+    restored = np.empty_like(x)
+    restored[:, perm] = x * signs[None, :]
+    return restored
+
+
+def effective_sketch_dim(requested_m: int, d: int) -> int:
+    if d <= 512:
+        return min(requested_m, d)
+    if d <= 1024:
+        return min(requested_m, 256)
+    if d <= 2048:
+        return min(requested_m, 128)
+    return min(requested_m, 64)
+
+
 @st.cache_data(show_spinner=False)
 def gaussian_sketch(m: int, d: int, seed: int) -> np.ndarray:
     rng = np.random.default_rng(seed)
@@ -566,6 +605,7 @@ def cosine_mean(a: np.ndarray, b: np.ndarray) -> float:
     return float(np.mean(np.sum(a[valid] * b[valid], axis=1) / (an[valid] * bn[valid])))
 
 
+@st.cache_data(show_spinner=False)
 def compute_metrics(x: np.ndarray, x_hat: np.ndarray, q: np.ndarray) -> Dict[str, float]:
     diff = x - x_hat
     mse = float(np.mean(np.sum(diff * diff, axis=1)))
@@ -594,6 +634,7 @@ def softmax_stable(values: np.ndarray, temperature: float = 1.0) -> np.ndarray:
     return ex / (float(np.sum(ex)) + EPS)
 
 
+@st.cache_data(show_spinner=False)
 def attention_proxy_metrics(true_ip: np.ndarray, est_ip: np.ndarray, temperature: float, top_k: int = 10) -> Dict[str, float]:
     true_scores = softmax_stable(true_ip, temperature)
     est_scores = softmax_stable(est_ip, temperature)
@@ -663,22 +704,25 @@ def quantize_by_codebook(values: np.ndarray, codebook: np.ndarray) -> Tuple[np.n
 
 
 
+@st.cache_data(show_spinner=False)
 def turbo_quantize_mse(x: np.ndarray, bits: int, precondition: bool, seed: int) -> Tuple[np.ndarray, Dict[str, np.ndarray]]:
     d = x.shape[1]
     levels = max(1, 2 ** bits)
     norms = np.linalg.norm(x, axis=1, keepdims=True) + EPS
     x_unit = x / norms
-    rot = random_orthogonal(d, seed + 101) if precondition else np.eye(d)
-    x_rot = x_unit @ rot.T
+    rot = build_preconditioner(d, seed + 101) if precondition else np.eye(d)
+    x_rot = apply_preconditioner_rows(x_unit, rot)
     codebook = turbo_codebook(d, bits, seed + 202)
     xq_rot, idx = quantize_by_codebook(x_rot, codebook)
-    xq_unit = xq_rot @ rot
+    xq_unit = invert_preconditioner_rows(xq_rot, rot)
     xq = xq_unit * norms
     details = {
         "rot": x_rot,
         "rot_scaled": x_rot * norms,
         "q_rot": xq_rot,
+        "q_rot_scaled": xq_rot * norms,
         "q_unit": xq_unit,
+        "reconstructed": xq,
         "norms": norms[:, 0],
         "codebook": codebook,
         "indices": idx,
@@ -689,17 +733,19 @@ def turbo_quantize_mse(x: np.ndarray, bits: int, precondition: bool, seed: int) 
 
 
 
+@st.cache_data(show_spinner=False)
 def turbo_quantize_prod(x: np.ndarray, bits: int, precondition: bool, seed: int) -> Tuple[np.ndarray, Dict[str, np.ndarray]]:
     levels = max(1, 2 ** bits)
     base_bits = max(1, bits - 1)
     x_base, details = turbo_quantize_mse(x, base_bits, precondition, seed)
     residual = x - x_base
     d = x.shape[1]
-    s = gaussian_sketch(d, d, seed + 303)
+    sketch_dim = effective_sketch_dim(d, d)
+    s = gaussian_sketch(sketch_dim, d, seed + 303)
     qjl = np.sign(residual @ s.T)
     qjl[qjl == 0] = 1
     gamma = np.linalg.norm(residual, axis=1, keepdims=True)
-    residual_hat = math.sqrt(math.pi / 2.0) / d * gamma * (qjl @ s)
+    residual_hat = math.sqrt(math.pi / 2.0) / sketch_dim * gamma * (qjl @ s)
     x_hat = x_base + residual_hat
     details.update(
         {
@@ -709,6 +755,8 @@ def turbo_quantize_prod(x: np.ndarray, bits: int, precondition: bool, seed: int)
             "gamma": gamma[:, 0],
             "sketch": s,
             "residual_hat": residual_hat,
+            "residual_mid": x_base + 0.5 * residual_hat,
+            "reconstructed": x_hat,
             "base_bits": np.array([base_bits]),
             "color_ids": (details.get("color_ids", np.zeros(len(x), dtype=int)) + hash_ids((qjl > 0).astype(int), levels)) % levels,
         }
@@ -721,6 +769,7 @@ def turbo_quantize_prod(x: np.ndarray, bits: int, precondition: bool, seed: int)
 # -----------------------------
 
 
+@st.cache_data(show_spinner=False)
 def baseline_uniform_quantize(x: np.ndarray, bits: int) -> Tuple[np.ndarray, Dict[str, np.ndarray]]:
     levels = max(1, 2 ** bits)
     qmin = float(np.quantile(x, 0.01))
@@ -732,6 +781,7 @@ def baseline_uniform_quantize(x: np.ndarray, bits: int) -> Tuple[np.ndarray, Dic
     x_hat, idx = quantize_by_codebook(clipped, codebook)
     details = {
         "clipped": clipped,
+        "reconstructed": x_hat,
         "codebook": codebook,
         "indices": idx,
         "qmin": np.array([qmin]),
@@ -797,7 +847,8 @@ def polar_forward_single(x: np.ndarray) -> Tuple[float, List[np.ndarray]]:
     first_angles = []
     pair_radii = []
     for j in range(0, len(cur), 2):
-        a, b = cur[j], cur[j + 1]
+        a = cur[j]
+        b = cur[j + 1] if j + 1 < len(cur) else 0.0
         first_angles.append(np.mod(np.arctan2(b, a), 2 * np.pi))
         pair_radii.append(math.hypot(a, b))
     levels.append(np.array(first_angles, dtype=float))
@@ -806,7 +857,8 @@ def polar_forward_single(x: np.ndarray) -> Tuple[float, List[np.ndarray]]:
         angles = []
         next_radii = []
         for j in range(0, len(radii), 2):
-            left, right = radii[j], radii[j + 1]
+            left = radii[j]
+            right = radii[j + 1] if j + 1 < len(radii) else 0.0
             angles.append(math.atan2(right, left))
             next_radii.append(math.hypot(left, right))
         levels.append(np.array(angles, dtype=float))
@@ -815,7 +867,7 @@ def polar_forward_single(x: np.ndarray) -> Tuple[float, List[np.ndarray]]:
 
 
 
-def polar_inverse_single(radius: float, levels: List[np.ndarray]) -> np.ndarray:
+def polar_inverse_single(radius: float, levels: List[np.ndarray], output_dim: Optional[int] = None) -> np.ndarray:
     cur = np.array([radius], dtype=float)
     for lvl in range(len(levels) - 1, 0, -1):
         angles = levels[lvl]
@@ -831,6 +883,8 @@ def polar_inverse_single(radius: float, levels: List[np.ndarray]) -> np.ndarray:
         r = cur[i]
         out[2 * i] = r * math.cos(float(ang))
         out[2 * i + 1] = r * math.sin(float(ang))
+    if output_dim is not None:
+        return out[:output_dim]
     return out
 
 
@@ -860,11 +914,12 @@ def polar_level_bits(bits: int) -> Tuple[int, int]:
 
 
 
+@st.cache_data(show_spinner=False)
 def polar_quantize(x: np.ndarray, bits: int, precondition: bool, seed: int) -> Tuple[np.ndarray, Dict[str, np.ndarray]]:
     d = x.shape[1]
     levels = max(1, 2 ** bits)
-    rot = random_orthogonal(d, seed + 404) if precondition else np.eye(d)
-    x_rot = x @ rot.T
+    rot = build_preconditioner(d, seed + 404) if precondition else np.eye(d)
+    x_rot = apply_preconditioner_rows(x, rot)
     first_bits, upper_bits = polar_level_bits(bits)
     first_codebook = uniform_angle_codebook(0.0, 2 * np.pi, first_bits)
     upper_codebook = uniform_angle_codebook(0.0, np.pi / 2.0, upper_bits)
@@ -886,18 +941,19 @@ def polar_quantize(x: np.ndarray, bits: int, precondition: bool, seed: int) -> T
             q_levels.append(q)
         first_angle = float(q_levels[0][0]) if len(q_levels[0]) else 0.0
         color_ids.append(int(np.floor((first_angle / (2 * np.pi)) * levels)) % levels)
-        reconstructed_rot.append(polar_inverse_single(radius, q_levels))
+        reconstructed_rot.append(polar_inverse_single(radius, q_levels, output_dim=d))
     x_hat_rot = np.vstack(reconstructed_rot)
-    x_hat = x_hat_rot @ rot
+    x_hat = invert_preconditioner_rows(x_hat_rot, rot)
     details = {
         "rot": x_rot,
         "recon_rot": x_hat_rot,
+        "reconstructed": x_hat,
         "first_codebook": first_codebook,
         "upper_codebook": upper_codebook,
         "lvl0_before": np.array(lvl_before.get(0, [])),
         "lvl0_after": np.array(lvl_after.get(0, [])),
-        "lvllast_before": np.array(lvl_before.get(int(math.log2(d)) - 1, [])),
-        "lvllast_after": np.array(lvl_after.get(int(math.log2(d)) - 1, [])),
+        "lvllast_before": np.array(lvl_before.get(max(lvl_before.keys(), default=0), [])),
+        "lvllast_after": np.array(lvl_after.get(max(lvl_after.keys(), default=0), [])),
         "first_bits": np.array([first_bits]),
         "upper_bits": np.array([upper_bits]),
         "color_ids": np.array(color_ids, dtype=int),
@@ -907,17 +963,19 @@ def polar_quantize(x: np.ndarray, bits: int, precondition: bool, seed: int) -> T
 
 
 
+@st.cache_data(show_spinner=False)
 def polar_quantize_prod(x: np.ndarray, bits: int, precondition: bool, seed: int) -> Tuple[np.ndarray, Dict[str, np.ndarray]]:
     levels = max(1, 2 ** bits)
     base_bits = max(1, bits - 1)
     x_base, details = polar_quantize(x, base_bits, precondition, seed)
     residual = x - x_base
     d = x.shape[1]
-    s = gaussian_sketch(d, d, seed + 909)
+    sketch_dim = effective_sketch_dim(d, d)
+    s = gaussian_sketch(sketch_dim, d, seed + 909)
     qjl = np.sign(residual @ s.T)
     qjl[qjl == 0] = 1
     gamma = np.linalg.norm(residual, axis=1, keepdims=True)
-    residual_hat = math.sqrt(math.pi / 2.0) / d * gamma * (qjl @ s)
+    residual_hat = math.sqrt(math.pi / 2.0) / sketch_dim * gamma * (qjl @ s)
     x_hat = x_base + residual_hat
     details.update(
         {
@@ -927,6 +985,8 @@ def polar_quantize_prod(x: np.ndarray, bits: int, precondition: bool, seed: int)
             "gamma": gamma[:, 0],
             "sketch": s,
             "residual_hat": residual_hat,
+            "residual_mid": x_base + 0.5 * residual_hat,
+            "reconstructed": x_hat,
             "base_bits": np.array([base_bits]),
             "color_ids": (details.get("color_ids", np.zeros(len(x), dtype=int)) + hash_ids((qjl > 0).astype(int), levels)) % levels,
         }
@@ -940,16 +1000,18 @@ def polar_quantize_prod(x: np.ndarray, bits: int, precondition: bool, seed: int)
 
 
 
+@st.cache_data(show_spinner=False)
 def qjl_quantize(x: np.ndarray, q: np.ndarray, m: int, seed: int, bits: int) -> Tuple[np.ndarray, Dict[str, np.ndarray]]:
     d = x.shape[1]
     levels = max(1, 2 ** bits)
-    s = gaussian_sketch(m, d, seed + 505)
+    sketch_dim = effective_sketch_dim(m, d)
+    s = gaussian_sketch(sketch_dim, d, seed + 505)
     signed = np.sign(x @ s.T)
     signed[signed == 0] = 1
     norms = np.linalg.norm(x, axis=1, keepdims=True)
     sq = s @ q
-    ip_est = math.sqrt(math.pi / 2.0) / m * norms[:, 0] * (signed @ sq)
-    x_hat = math.sqrt(math.pi / 2.0) / m * norms * (signed @ s)
+    ip_est = math.sqrt(math.pi / 2.0) / sketch_dim * norms[:, 0] * (signed @ sq)
+    x_hat = math.sqrt(math.pi / 2.0) / sketch_dim * norms * (signed @ s)
     sign_bits = (signed[:, : min(6, signed.shape[1])] > 0).astype(int)
     weights = 2 ** np.arange(sign_bits.shape[1])
     color_ids = (sign_bits * weights).sum(axis=1) % levels
@@ -961,7 +1023,8 @@ def qjl_quantize(x: np.ndarray, q: np.ndarray, m: int, seed: int, bits: int) -> 
         "ip_est": ip_est,
         "ip_true": x @ q,
         "color_ids": color_ids.astype(int),
-        "m": np.array([m]),
+        "m": np.array([sketch_dim]),
+        "requested_m": np.array([m]),
     }
     return x_hat, details
 
@@ -1014,28 +1077,25 @@ def scatter_overlay_3d(
 
 
 def process_figure_3d(
-    original_3d: np.ndarray,
-    rotated_3d: np.ndarray,
-    quantized_3d: np.ndarray,
+    stages: List[Dict[str, Any]],
     color_ids: np.ndarray,
     title: str,
     levels: int,
-    stage1_label: str = "중간 단계",
-    stage2_label: str = "최종 양자화",
     point_indices: Optional[np.ndarray] = None,
     selected_index: Optional[int] = None,
 ) -> go.Figure:
     colors_final = color_array_from_ids(color_ids, levels)
-    point_indices = np.arange(len(original_3d), dtype=int) if point_indices is None else np.asarray(point_indices, dtype=int)
-    stages = [("원본", original_3d, [ORIGINAL_POINT_COLOR] * len(original_3d))]
-    for t in np.linspace(0.2, 1.0, 5):
-        cur = interpolate_points(original_3d, rotated_3d, float(t))
-        stages.append((f"{stage1_label} {int(round(t * 100))}%", cur, [ORIGINAL_POINT_COLOR] * len(cur)))
-    for t in np.linspace(0.2, 1.0, 5):
-        cur = interpolate_points(rotated_3d, quantized_3d, float(t))
-        stages.append((f"{stage2_label} {int(round(t * 100))}%", cur, colors_final))
+    point_indices = np.arange(len(stages[0]["points"]), dtype=int) if point_indices is None else np.asarray(point_indices, dtype=int)
 
-    all_pts = np.vstack([original_3d, rotated_3d, quantized_3d])
+    normalized_stages: List[Dict[str, Any]] = []
+    for idx, stage in enumerate(stages):
+        pts = np.asarray(stage["points"], dtype=float)
+        stage_colors = stage.get("colors")
+        if stage_colors is None:
+            stage_colors = colors_final if idx == len(stages) - 1 else [ORIGINAL_POINT_COLOR] * len(pts)
+        normalized_stages.append({"label": str(stage["label"]), "points": pts, "colors": list(stage_colors)})
+
+    all_pts = np.vstack([stage["points"] for stage in normalized_stages])
     mins = all_pts.min(axis=0)
     maxs = all_pts.max(axis=0)
     pads = np.maximum((maxs - mins) * 0.15, 0.25)
@@ -1045,23 +1105,36 @@ def process_figure_3d(
 
     selected_mask = np.asarray(point_indices == int(selected_index), dtype=bool) if selected_index is not None else np.zeros(len(point_indices), dtype=bool)
 
-    frames = []
-    for label, pts, colors in stages:
+    timeline: List[Tuple[str, np.ndarray, List[str]]] = []
+    first_stage = normalized_stages[0]
+    timeline.append((first_stage["label"], first_stage["points"], first_stage["colors"]))
+    for prev_stage, next_stage in zip(normalized_stages[:-1], normalized_stages[1:]):
+        for t in (0.25, 0.5, 0.75):
+            cur = interpolate_points(prev_stage["points"], next_stage["points"], float(t))
+            interp_colors = next_stage["colors"] if t >= 0.5 else prev_stage["colors"]
+            timeline.append((f"{prev_stage['label']} → {next_stage['label']} {int(round(t * 100))}%", cur, interp_colors))
+        timeline.append((next_stage["label"], next_stage["points"], next_stage["colors"]))
+
+    final_points = normalized_stages[-1]["points"]
+
+    def frame_payload(cur_label: str, pts: np.ndarray, colors: List[str]) -> List[go.Scatter3d]:
         frame_data = [
             go.Scatter3d(
-                x=quantized_3d[:, 0], y=quantized_3d[:, 1], z=quantized_3d[:, 2],
+                x=final_points[:, 0], y=final_points[:, 1], z=final_points[:, 2],
                 mode="markers",
                 name="최종 상태",
                 customdata=point_indices[:, None],
-                marker=dict(size=3.2, opacity=0.18, color=colors_final),
+                marker=dict(size=3.8, opacity=0.85, color=FINAL_REFERENCE_COLOR),
+                visible="legendonly",
                 hovertemplate="벡터 #%{customdata[0]}<extra></extra>",
             ),
             go.Scatter3d(
-                x=original_3d[:, 0], y=original_3d[:, 1], z=original_3d[:, 2],
+                x=normalized_stages[0]["points"][:, 0], y=normalized_stages[0]["points"][:, 1], z=normalized_stages[0]["points"][:, 2],
                 mode="markers",
                 name="원본 기준",
                 customdata=point_indices[:, None],
-                marker=dict(size=3.0, opacity=0.16, color=ORIGINAL_POINT_COLOR),
+                marker=dict(size=3.8, opacity=0.85, color=ORIGINAL_REFERENCE_COLOR),
+                visible="legendonly",
                 hovertemplate="벡터 #%{customdata[0]}<extra></extra>",
             ),
             go.Scatter3d(
@@ -1078,33 +1151,20 @@ def process_figure_3d(
             frame_data.append(
                 go.Scatter3d(
                     x=sel_pts[:, 0], y=sel_pts[:, 1], z=sel_pts[:, 2],
-                    mode="markers",
+                    mode="markers+lines",
                     name=f"선택 벡터 #{int(selected_index)}",
                     customdata=point_indices[selected_mask, None],
                     marker=dict(size=8.5, opacity=1.0, color="#111827", line=dict(width=2.0, color="#f59e0b")),
+                    line=dict(color="#f59e0b", width=6),
+                    hovertemplate="벡터 #%{customdata[0]}<extra></extra>",
                 )
             )
-        frames.append(go.Frame(name=label, data=frame_data, traces=list(range(len(frame_data)))))
+        return frame_data
 
-    data = [
-        go.Scatter3d(x=quantized_3d[:, 0], y=quantized_3d[:, 1], z=quantized_3d[:, 2], mode="markers", name="최종 상태", customdata=point_indices[:, None], marker=dict(size=3.2, opacity=0.18, color=colors_final), hovertemplate="벡터 #%{customdata[0]}<extra></extra>"),
-        go.Scatter3d(x=original_3d[:, 0], y=original_3d[:, 1], z=original_3d[:, 2], mode="markers", name="원본 기준", customdata=point_indices[:, None], marker=dict(size=3.0, opacity=0.16, color=ORIGINAL_POINT_COLOR), hovertemplate="벡터 #%{customdata[0]}<extra></extra>"),
-        go.Scatter3d(x=quantized_3d[:, 0], y=quantized_3d[:, 1], z=quantized_3d[:, 2], mode="markers", name="현재 단계", customdata=point_indices[:, None], marker=dict(size=4.5, opacity=0.94, color=colors_final, line=dict(width=0.45, color="white")), hovertemplate="벡터 #%{customdata[0]}<extra></extra>"),
-    ]
-    if np.any(selected_mask):
-        sel_pts = quantized_3d[selected_mask]
-        data.append(
-            go.Scatter3d(
-                x=sel_pts[:, 0], y=sel_pts[:, 1], z=sel_pts[:, 2],
-                mode="markers",
-                name=f"선택 벡터 #{int(selected_index)}",
-                customdata=point_indices[selected_mask, None],
-                marker=dict(size=8.5, opacity=1.0, color="#111827", line=dict(width=2.0, color="#f59e0b")),
-                hovertemplate="벡터 #%{customdata[0]}<extra></extra>",
-            )
-        )
+    frames = [go.Frame(name=label, data=frame_payload(label, pts, colors), traces=list(range(len(frame_payload(label, pts, colors))))) for label, pts, colors in timeline]
 
-    fig = go.Figure(data=data, frames=frames)
+    initial_label, initial_points, initial_colors = timeline[-1]
+    fig = go.Figure(data=frame_payload(initial_label, initial_points, initial_colors), frames=frames)
     fig.update_layout(
         title=dict(text=title, font=dict(color="black")),
         template="plotly_white",
@@ -1128,12 +1188,12 @@ def process_figure_3d(
             "bordercolor": "#cbd5e1",
             "borderwidth": 1,
             "buttons": [
-                {"label": "Play", "method": "animate", "args": [[label for label, _, _ in stages], {"frame": {"duration": 200, "redraw": True}, "fromcurrent": False, "mode": "immediate", "transition": {"duration": 0}}]},
+                {"label": "Play", "method": "animate", "args": [[label for label, _, _ in timeline], {"frame": {"duration": 180, "redraw": True}, "fromcurrent": False, "mode": "immediate", "transition": {"duration": 0}}]},
                 {"label": "Pause", "method": "animate", "args": [[None], {"frame": {"duration": 0, "redraw": False}, "mode": "immediate", "transition": {"duration": 0}}]},
             ],
         }],
         sliders=[{
-            "active": len(stages) - 1,
+            "active": len(timeline) - 1,
             "currentvalue": {"prefix": "3D 단계: ", "font": {"color": "black"}},
             "font": {"color": "black"},
             "bgcolor": "white",
@@ -1143,7 +1203,7 @@ def process_figure_3d(
             "pad": {"t": 36},
             "steps": [
                 {"label": label, "method": "animate", "args": [[label], {"mode": "immediate", "frame": {"duration": 0, "redraw": True}, "transition": {"duration": 0}}]}
-                for label, _, _ in stages
+                for label, _, _ in timeline
             ],
         }],
         legend=dict(bgcolor="rgba(255,255,255,0.82)", font=dict(color="black")),
@@ -1151,7 +1211,6 @@ def process_figure_3d(
         selectionrevision=str(selected_index) if selected_index is not None else "none",
     )
     return fig
-
 
 def histogram_with_codebook(values: np.ndarray, codebook: np.ndarray, title: str) -> go.Figure:
     fig = go.Figure()
@@ -1758,8 +1817,8 @@ def qjl_process_figure_3d(
     frames = []
     for label, pts, colors in stages:
         frame_data = [
-            go.Scatter3d(x=surrogate_3d[:, 0], y=surrogate_3d[:, 1], z=surrogate_3d[:, 2], mode="markers", name="최종 surrogate", customdata=point_indices[:, None], marker=dict(size=3.2, opacity=0.16, color=colors_final), hovertemplate="벡터 #%{customdata[0]}<extra></extra>"),
-            go.Scatter3d(x=original_3d[:, 0], y=original_3d[:, 1], z=original_3d[:, 2], mode="markers", name="원본 기준", customdata=point_indices[:, None], marker=dict(size=3.0, opacity=0.14, color=ORIGINAL_POINT_COLOR), hovertemplate="벡터 #%{customdata[0]}<extra></extra>"),
+            go.Scatter3d(x=surrogate_3d[:, 0], y=surrogate_3d[:, 1], z=surrogate_3d[:, 2], mode="markers", name="최종 상태", customdata=point_indices[:, None], marker=dict(size=3.8, opacity=0.85, color=FINAL_REFERENCE_COLOR), visible="legendonly", hovertemplate="벡터 #%{customdata[0]}<extra></extra>"),
+            go.Scatter3d(x=original_3d[:, 0], y=original_3d[:, 1], z=original_3d[:, 2], mode="markers", name="원본 기준", customdata=point_indices[:, None], marker=dict(size=3.8, opacity=0.85, color=ORIGINAL_REFERENCE_COLOR), visible="legendonly", hovertemplate="벡터 #%{customdata[0]}<extra></extra>"),
             go.Scatter3d(x=pts[:, 0], y=pts[:, 1], z=pts[:, 2], mode="markers", name="현재 단계", customdata=point_indices[:, None], marker=dict(size=4.8, opacity=0.94, color=colors, line=dict(width=0.45, color="white")), hovertemplate="벡터 #%{customdata[0]}<extra></extra>"),
         ]
         if np.any(selected_mask):
@@ -1768,8 +1827,8 @@ def qjl_process_figure_3d(
         frames.append(go.Frame(name=label, data=frame_data, traces=list(range(len(frame_data)))))
 
     data = [
-        go.Scatter3d(x=surrogate_3d[:, 0], y=surrogate_3d[:, 1], z=surrogate_3d[:, 2], mode="markers", name="최종 surrogate", customdata=point_indices[:, None], marker=dict(size=3.2, opacity=0.16, color=colors_final), hovertemplate="벡터 #%{customdata[0]}<extra></extra>"),
-        go.Scatter3d(x=original_3d[:, 0], y=original_3d[:, 1], z=original_3d[:, 2], mode="markers", name="원본 기준", customdata=point_indices[:, None], marker=dict(size=3.0, opacity=0.14, color=ORIGINAL_POINT_COLOR), hovertemplate="벡터 #%{customdata[0]}<extra></extra>"),
+        go.Scatter3d(x=surrogate_3d[:, 0], y=surrogate_3d[:, 1], z=surrogate_3d[:, 2], mode="markers", name="최종 상태", customdata=point_indices[:, None], marker=dict(size=3.8, opacity=0.85, color=FINAL_REFERENCE_COLOR), visible="legendonly", hovertemplate="벡터 #%{customdata[0]}<extra></extra>"),
+        go.Scatter3d(x=original_3d[:, 0], y=original_3d[:, 1], z=original_3d[:, 2], mode="markers", name="원본 기준", customdata=point_indices[:, None], marker=dict(size=3.8, opacity=0.85, color=ORIGINAL_REFERENCE_COLOR), visible="legendonly", hovertemplate="벡터 #%{customdata[0]}<extra></extra>"),
         go.Scatter3d(x=surrogate_3d[:, 0], y=surrogate_3d[:, 1], z=surrogate_3d[:, 2], mode="markers", name="현재 단계", customdata=point_indices[:, None], marker=dict(size=4.8, opacity=0.94, color=colors_final, line=dict(width=0.45, color="white")), hovertemplate="벡터 #%{customdata[0]}<extra></extra>"),
     ]
     if np.any(selected_mask):
@@ -1965,6 +2024,9 @@ inject_theme()
 st.title("TurboQuant / PolarQuant / QJL Explorer")
 st.caption("이 저장소는 TurboQuant, PolarQuant, QJL이 무엇을 보존하고 어떻게 달라지는지를 직관적으로 비교해 보여 주는 시각화 데모입니다.")
 
+DIMENSION_PRESETS = [3, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096]
+
+
 distribution_notes = {
     "Gaussian": "가장 기본적인 분포입니다. 좌표별 양자화와 내적 오차를 무난하게 비교할 때 적합합니다.",
     "Gaussian + outliers": "대부분은 중앙에 모여 있고 일부 이상치가 멀리 떨어져 있는 경우입니다. 이상치에 대한 민감도를 보기 좋습니다.",
@@ -1973,19 +2035,48 @@ distribution_notes = {
     "Ball + outliers": "구 내부에 점이 퍼져 있고 일부 이상치가 바깥에 있는 경우입니다. PolarQuant의 반지름/각도 관찰에 특히 보기 좋습니다.",
 }
 
+WIDGET_DEFAULTS = {
+    "app_mode": "Balanced",
+    "n_points": 900,
+    "dimension_input": 32,
+    "distribution": "Gaussian",
+    "precision": "fp16-like",
+    "bit_width": 3,
+    "precondition": True,
+    "projection_mode": "Random projection",
+    "seed_input": 7,
+    "plot_points": 500,
+    "process_points": 100,
+}
+for _state_key, _default_value in WIDGET_DEFAULTS.items():
+    st.session_state.setdefault(_state_key, _default_value)
+
 with st.sidebar:
     st.header("설정")
-    mode = st.radio("앱 모드", ["Balanced", "Paper-aligned"], index=0, help="Balanced는 설명을 우선하고, Paper-aligned는 논문 관점 설명을 조금 더 강조합니다.")
-    n_points = st.slider("벡터 수", 300, 2200, 900, step=100)
-    dimension = st.select_slider("차원 d", options=[8, 16, 32, 64, 128], value=32)
-    distribution = st.selectbox("데이터 분포", ["Gaussian", "Gaussian + outliers", "Unit sphere", "Sphere shell + outliers", "Ball + outliers"])
-    precision = st.selectbox("입력 정밀도 시뮬레이션", ["fp16-like", "fp8-like", "int8-like"])
-    bit_width = st.slider("양자화 비트 수", 1, 6, 3, help="각 방법이 한 좌표 또는 한 단계에서 대략 얼마나 촘촘하게 양자화하는지 보는 기준 비트 수입니다.")
-    precondition = st.toggle("랜덤 전처리 적용", value=True)
-    projection_mode = st.selectbox("3D 공통 투영 방식", ["Random projection", "PCA", "First 3 coordinates"])
-    seed = st.number_input("시드", min_value=0, max_value=999999, value=7, step=1)
-    plot_points = st.slider("비교용 표시 점 수", 200, 1200, 500, step=100)
-    process_points = st.slider("3D 애니메이션 점 수", 40, 220, 100, step=20)
+    mode = st.radio("앱 모드", ["Balanced", "Paper-aligned"], key="app_mode", help="Balanced는 설명을 우선하고, Paper-aligned는 논문 관점 설명을 조금 더 강조합니다.")
+    n_points = st.slider("벡터 수", 300, 2200, step=100, key="n_points")
+    st.caption("차원 d는 숫자로 직접 입력하고, 자주 쓰는 값은 아래 프리셋 버튼으로 바로 넣을 수 있습니다.")
+    preset_cols = st.columns(4)
+    for preset_index, preset_dimension in enumerate(DIMENSION_PRESETS):
+        if preset_cols[preset_index % len(preset_cols)].button(str(preset_dimension), key=f"dimension_preset_{preset_dimension}", use_container_width=True):
+            st.session_state.dimension_input = int(preset_dimension)
+            st.rerun()
+    dimension = int(st.number_input(
+        "차원 d",
+        min_value=3,
+        max_value=4096,
+        step=1,
+        key="dimension_input",
+        help="슬라이더 대신 직접 숫자를 넣어 큰 범위에서도 원하는 차원을 빠르게 고를 수 있습니다.",
+    ))
+    distribution = st.selectbox("데이터 분포", ["Gaussian", "Gaussian + outliers", "Unit sphere", "Sphere shell + outliers", "Ball + outliers"], key="distribution")
+    precision = st.selectbox("입력 정밀도 시뮬레이션", ["fp16-like", "fp8-like", "int8-like"], key="precision")
+    bit_width = st.slider("양자화 비트 수", 1, 6, help="각 방법이 한 좌표 또는 한 단계에서 대략 얼마나 촘촘하게 양자화하는지 보는 기준 비트 수입니다.", key="bit_width")
+    precondition = st.toggle("랜덤 전처리 적용", key="precondition")
+    projection_mode = st.selectbox("3D 공통 투영 방식", ["Random projection", "PCA", "First 3 coordinates"], key="projection_mode")
+    seed = st.number_input("시드", min_value=0, max_value=999999, step=1, key="seed_input")
+    plot_points = st.slider("비교용 표시 점 수", 200, 1200, step=100, key="plot_points")
+    process_points = st.slider("3D 애니메이션 점 수", 40, 220, step=20, key="process_points")
     apply_pending_inspect_vector(max(0, n_points - 1))
     inspect_vector = st.number_input(
         "단면 예시 벡터 번호",
@@ -1998,7 +2089,18 @@ with st.sidebar:
     )
     max_pair = max(0, dimension // 2 - 1)
     st.session_state.slice_pair_input = int(max(0, min(max_pair, st.session_state.get("slice_pair_input", 0))))
-    slice_pair = st.slider("단면 좌표쌍 번호", 0, max_pair, key="slice_pair_input", help="i를 고르면 (x[2i], x[2i+1]) 좌표쌍을 2D 단면으로 봅니다.")
+    if max_pair == 0:
+        slice_pair = st.number_input(
+            "단면 좌표쌍 번호",
+            min_value=0,
+            max_value=0,
+            value=0,
+            step=1,
+            disabled=True,
+            help="차원 d가 아주 작을 때는 볼 수 있는 2D 좌표쌍이 하나뿐이라 값이 0으로 고정됩니다.",
+        )
+    else:
+        slice_pair = st.slider("단면 좌표쌍 번호", 0, max_pair, key="slice_pair_input", help="i를 고르면 (x[2i], x[2i+1]) 좌표쌍을 2D 단면으로 봅니다.")
     st.caption("단면 예시 벡터 번호 = 한 개 샘플 확대 보기 / 단면 좌표쌍 번호 = (x[2i], x[2i+1]) 2D 보기")
     st.caption(f"선택한 데이터 분포: {distribution_notes[distribution]}")
     st.caption(f"양자화 색상 그룹 수 = 2^{bit_width} = {2 ** bit_width}")
@@ -2067,29 +2169,81 @@ mean3, basis3 = fit_projector(common_ref, projection_mode, int(seed) + 10, 3)
 proj_x = apply_projector(x[static_idx], mean3, basis3)
 proj_qjl = apply_projector(x_qjl_vis[static_idx], mean3, basis3)
 
-def build_process_projection(mid_state: np.ndarray, final_state: np.ndarray, idx: np.ndarray, seed_offset: int):
-    ref = np.vstack([x[idx], mid_state[idx], final_state[idx]])
+def build_projected_process_stages(stage_defs: List[Tuple[str, np.ndarray, Optional[List[str]]]], idx: np.ndarray, seed_offset: int) -> List[Dict[str, Any]]:
+    ref = np.vstack([points[idx] for _, points, _ in stage_defs])
     mean_p, basis_p = fit_projector(ref, projection_mode, int(seed) + seed_offset, 3)
-    return apply_projector(x[idx], mean_p, basis_p), apply_projector(mid_state[idx], mean_p, basis_p), apply_projector(final_state[idx], mean_p, basis_p)
+    projected: List[Dict[str, Any]] = []
+    for label, points, colors in stage_defs:
+        stage_colors = None if colors is None else list(np.asarray(colors, dtype=object)[idx])
+        projected.append({
+            "label": label,
+            "points": apply_projector(points[idx], mean_p, basis_p),
+            "colors": stage_colors,
+        })
+    return projected
 
-process_registry = {}
-for offset, method_name, mid_state, stage1_label, stage2_label in [
-    (11, "기존 양자화", baseline_details["clipped"], "클리핑", "균일 스냅"),
-    (101, "TurboQuant", turbo_details["rot_scaled"], "회전", "코드북 스냅"),
-    (202, "PolarQuant", polar_details["rot"], "회전", "각도 스냅"),
-    (303, "Turbo + QJL", turbo_prod_details["rot_scaled"], "회전", "잔차 보정"),
-    (404, "Polar + QJL", polar_prod_details["rot"], "회전", "잔차 보정"),
-    (505, "QJL", qjl_mid_state, "JL proxy", "surrogate 역투영"),
-]:
-    orig3, mid3, fin3 = build_process_projection(mid_state, method_registry[method_name].reconstructed, process_idx, offset)
-    process_registry[method_name] = {
-        "orig": orig3,
-        "mid": mid3,
-        "final": fin3,
-        "color_ids": method_registry[method_name].details["color_ids"][process_idx],
-        "stage1_label": stage1_label,
-        "stage2_label": stage2_label,
-    }
+process_registry = {
+    "기존 양자화": {
+        "stages": build_projected_process_stages([
+            ("원본", x, None),
+            ("클리핑", baseline_details["clipped"], None),
+            ("균일 스냅", x_baseline, color_array_from_ids(baseline_details["color_ids"], levels)),
+        ], process_idx, 11),
+        "color_ids": baseline_details["color_ids"][process_idx],
+    },
+    "TurboQuant": {
+        "stages": build_projected_process_stages([
+            ("원본", x, None),
+            ("회전", turbo_details["rot_scaled"], None),
+            ("코드북 스냅", turbo_details["q_rot_scaled"], color_array_from_ids(turbo_details["color_ids"], levels)),
+            ("최종 복원", x_turbo, color_array_from_ids(turbo_details["color_ids"], levels)),
+        ], process_idx, 101),
+        "color_ids": turbo_details["color_ids"][process_idx],
+    },
+    "PolarQuant": {
+        "stages": build_projected_process_stages([
+            ("원본", x, None),
+            ("회전", polar_details["rot"], None),
+            ("각도 스냅", polar_details["recon_rot"], color_array_from_ids(polar_details["color_ids"], levels)),
+            ("최종 복원", x_polar, color_array_from_ids(polar_details["color_ids"], levels)),
+        ], process_idx, 202),
+        "color_ids": polar_details["color_ids"][process_idx],
+    },
+    "Turbo + QJL": {
+        "stages": build_projected_process_stages([
+            ("원본", x, None),
+            ("회전", turbo_prod_details["rot_scaled"], None),
+            ("base codebook snap", turbo_prod_details["q_rot_scaled"], color_array_from_ids(turbo_prod_details["color_ids"], levels)),
+            ("base reconstruction", turbo_prod_details["base"], color_array_from_ids(turbo_prod_details["color_ids"], levels)),
+            ("잔차 보정", turbo_prod_details["residual_mid"], color_array_from_ids(turbo_prod_details["color_ids"], levels)),
+            ("최종 복원", x_turbo_prod, color_array_from_ids(turbo_prod_details["color_ids"], levels)),
+        ], process_idx, 303),
+        "color_ids": turbo_prod_details["color_ids"][process_idx],
+    },
+    "Polar + QJL": {
+        "stages": build_projected_process_stages([
+            ("원본", x, None),
+            ("회전", polar_prod_details["rot"], None),
+            ("base angle snap", polar_prod_details["recon_rot"], color_array_from_ids(polar_prod_details["color_ids"], levels)),
+            ("base reconstruction", polar_prod_details["base"], color_array_from_ids(polar_prod_details["color_ids"], levels)),
+            ("잔차 보정", polar_prod_details["residual_mid"], color_array_from_ids(polar_prod_details["color_ids"], levels)),
+            ("최종 복원", x_polar_prod, color_array_from_ids(polar_prod_details["color_ids"], levels)),
+        ], process_idx, 404),
+        "color_ids": polar_prod_details["color_ids"][process_idx],
+    },
+    "QJL": {
+        "stages": build_projected_process_stages([
+            ("원본", x, None),
+            ("JL proxy", qjl_mid_state, None),
+            ("surrogate 역투영", x_qjl_vis, color_array_from_ids(qjl_details["color_ids"], levels)),
+        ], process_idx, 505),
+        "color_ids": qjl_details["color_ids"][process_idx],
+    },
+}
+
+# UI labels keep the full method names, so provide explicit aliases as well.
+process_registry["TurboQuant + QJL"] = process_registry["Turbo + QJL"]
+process_registry["PolarQuant + QJL"] = process_registry["Polar + QJL"]
 
 inspect_idx = int(st.session_state.get("inspect_vector_value", inspect_vector))
 pair_start = 2 * int(slice_pair)
@@ -2152,7 +2306,7 @@ with baseline_tab:
     note_card("Baseline note", "이 탭은 Turbo / Polar / QJL보다 앞에 두는 기준선입니다. 별도 preconditioning 없이 원래 좌표계에서 좌표를 균일 코드북에 직접 스냅합니다.")
     render_method_sequence_panel("방법 순서 / 핵심 수식", [("범위 잡기", "공통 범위 q_min, q_max를 정합니다."), ("클리핑", "범위를 넘는 값을 q_min~q_max로 잘라냅니다."), ("균일 코드북", "2^b개 레벨의 선형 코드북을 만듭니다."), ("좌표 스냅", "각 좌표를 가장 가까운 코드북 값으로 붙입니다.")], [r"x_{clip} = \mathrm{clip}(x, q_{min}, q_{max})", r"\mathcal{C} = \mathrm{linspace}(q_{min}, q_{max}, 2^b)", r"\hat x_j = Q_b(x_{clip,j})"], "이 baseline을 먼저 보면 이후 Turbo의 회전형 코드북, Polar의 각도형 코드북, QJL의 sign sketch가 왜 필요한지 더 잘 보입니다.")
     look_box([
-        "3D 과정 보기에서 원본 → 클리핑 → 균일 스냅 순서를 먼저 보세요.",
+        "3D 과정 보기에서 원본 → 클리핑 → 균일 스냅 순서를 먼저 보세요. 마지막 단계는 스냅된 복원점입니다.",
         "오른쪽 단면 예시에서는 좌표쌍이 공통 격자 위로 어떻게 이동하는지 볼 수 있습니다.",
         "이 탭이 기준선이고, 다음 Turbo/Polar/QJL 탭들이 각각 어떤 점을 더 잘 보존하려는지 비교하면 좋습니다.",
     ])
@@ -2169,14 +2323,13 @@ with baseline_tab:
     baseline_process_left, baseline_process_right = st.columns([1.25, 0.95])
     with baseline_process_left:
         base_pick = plotly_chart_pick(process_figure_3d(
-            baseline_process["orig"][baseline_process_mask],
-            baseline_process["mid"][baseline_process_mask],
-            baseline_process["final"][baseline_process_mask],
+            [
+                {**stage, "points": stage["points"][baseline_process_mask], "colors": None if stage.get("colors") is None else list(np.asarray(stage["colors"], dtype=object)[baseline_process_mask])}
+                for stage in baseline_process["stages"]
+            ],
             baseline_process["color_ids"][baseline_process_mask],
             "기존 양자화 3D 과정",
             levels,
-            stage1_label=baseline_process["stage1_label"],
-            stage2_label=baseline_process["stage2_label"],
             point_indices=process_idx[baseline_process_mask],
             selected_index=inspect_idx,
         ), key="baseline_process_chart")
@@ -2216,7 +2369,7 @@ with turbo_tab:
     render_method_sequence_panel("방법 순서 / 핵심 수식", [("길이/방향 분리", "입력을 norm과 unit direction으로 나눕니다."), ("무작위 회전", "방향 벡터를 random rotation으로 섞습니다."), ("좌표별 코드북", "각 좌표를 common scalar codebook에 독립적으로 스냅합니다."), ("역회전 복원", "역회전 후 원래 norm을 다시 곱합니다.")], [r"u = x / \|x\|_2", r"z = Ru", r"\hat z_j = Q_b(z_j)", r"\hat x = \|x\|_2 R^\top \hat z"], "Turbo는 learned cluster map이 아니라 회전 뒤 좌표별 공통 코드북이 작동하는 구조로 설명하는 편이 정확합니다.")
     look_box([
         "회전 후 각 좌표가 코드북에 스냅되는 모습을 보세요.",
-        "3D 과정 보기에서 원본 → 회전 → 코드북 스냅 순서를 따라가 보세요.",
+        "3D 과정 보기에서 원본 → 회전 → 코드북 스냅 → 최종 복원 순서를 따라가 보세요.",
         "오른쪽 단면 예시에서는 선택한 좌표쌍이 실제로 어디로 이동했는지 바로 볼 수 있습니다.",
         "추가 그래프에는 좌표쌍 구름도와 내적 비교만 남겨 복잡도를 줄였습니다.",
     ])
@@ -2234,14 +2387,13 @@ with turbo_tab:
         data = turbo_process
         turbo_pick = plotly_chart_pick(
             process_figure_3d(
-                data["orig"][turbo_process_mask],
-                data["mid"][turbo_process_mask],
-                data["final"][turbo_process_mask],
+                [
+                    {**stage, "points": stage["points"][turbo_process_mask], "colors": None if stage.get("colors") is None else list(np.asarray(stage["colors"], dtype=object)[turbo_process_mask])}
+                    for stage in data["stages"]
+                ],
                 data["color_ids"][turbo_process_mask],
                 "TurboQuant 3D 과정",
                 levels,
-                stage1_label=data["stage1_label"],
-                stage2_label=data["stage2_label"],
                 point_indices=process_idx[turbo_process_mask],
                 selected_index=inspect_idx,
             ),
@@ -2320,7 +2472,7 @@ with polar_tab:
     render_polar_paper_panel(first_bits=int(polar_details["first_bits"][0]), upper_bits=int(polar_details["upper_bits"][0]), bit_width=bit_width)
     look_box([
         "단면 예시에서 원본 각도 θ와 양자화 각도 θ̂를 바로 비교해 보세요.",
-        "3D 과정 보기에서는 회전된 상태를 거쳐 최종 양자화점으로 이동합니다.",
+        "3D 과정 보기에서는 회전 → 각도 스냅 → 최종 복원 순서로 보시면 됩니다.",
         "오차 히스토그램과 내적 비교는 접어 두고 필요할 때만 펼치도록 정리했습니다.",
     ])
     metric_cards(metrics_polar, accents=["red", "blue", "red", "red", "red", "blue"])
@@ -2340,14 +2492,13 @@ with polar_tab:
         data = polar_process
         polar_pick = plotly_chart_pick(
             process_figure_3d(
-                data["orig"][polar_process_mask],
-                data["mid"][polar_process_mask],
-                data["final"][polar_process_mask],
+                [
+                    {**stage, "points": stage["points"][polar_process_mask], "colors": None if stage.get("colors") is None else list(np.asarray(stage["colors"], dtype=object)[polar_process_mask])}
+                    for stage in data["stages"]
+                ],
                 data["color_ids"][polar_process_mask],
                 "PolarQuant 3D 과정",
                 levels,
-                stage1_label=data["stage1_label"],
-                stage2_label=data["stage2_label"],
                 point_indices=process_idx[polar_process_mask],
                 selected_index=inspect_idx,
             ),
@@ -2461,10 +2612,10 @@ with qjl_tab:
         note_card("설명용 기하 시각화", "QJL의 실제 저장 표현은 sign(Sk)입니다. 그래서 아래 애니메이션은 원본 → JL proxy → sign bit snap(앞 3bit가 {-1,+1}로 수렴) → surrogate 역투영 흐름을 한 번에 보여 줍니다.")
         qjl_pick = plotly_chart_pick(
             qjl_process_figure_3d(
-                data["orig"],
-                data["mid"],
+                data["stages"][0]["points"],
+                data["stages"][1]["points"],
                 qjl_sign_stage,
-                data["final"],
+                data["stages"][2]["points"],
                 data["color_ids"],
                 "QJL surrogate / sign-bit process",
                 levels,
@@ -2489,19 +2640,21 @@ with compare_tab:
     with compare_geom_tab:
         look_box([
             "Turbo와 Polar는 먼저 복원·구조 보존 축으로 비교하는 편이 자연스럽습니다.",
-            "Turbo는 격자형 스냅, Polar는 각도형 스냅이라는 차이를 눈으로 먼저 보여 주세요.",
-            "QJL은 이 축에서 보조로만 언급하고, 본격 비교는 다음 탭에서 하는 편이 덜 헷갈립니다.",
+            "이 화면에는 같은 축 안에서 Turbo/Polar base와 Turbo/Polar + QJL residual을 함께 넣어 residual correction까지 바로 확인할 수 있게 했습니다.",
+            "Turbo는 회전→코드북 스냅→최종 복원, Turbo + QJL은 base reconstruction→잔차 보정→최종 복원까지 읽어 주세요.",
         ])
         st.markdown(markdown_table(["방법", "MSE", "MAE", "Mean cosine", "메인 포인트"], [
             ["기존 양자화", f"{metrics_baseline['MSE']:.4f}", f"{metrics_baseline['MAE']:.4f}", f"{metrics_baseline['Mean cosine']:.4f}", "Cartesian uniform baseline / 격자형 스냅"],
             ["TurboQuant", f"{metrics_turbo['MSE']:.4f}", f"{metrics_turbo['MAE']:.4f}", f"{metrics_turbo['Mean cosine']:.4f}", "공통 scalar codebook / 격자형 스냅"],
+            ["TurboQuant + QJL", f"{metrics_turbo_prod['MSE']:.4f}", f"{metrics_turbo_prod['MAE']:.4f}", f"{metrics_turbo_prod['Mean cosine']:.4f}", "base + residual QJL / 논문식 2단계"],
             ["PolarQuant", f"{metrics_polar['MSE']:.4f}", f"{metrics_polar['MAE']:.4f}", f"{metrics_polar['Mean cosine']:.4f}", "recursive polar / 각도형 스냅"],
+            ["PolarQuant + QJL", f"{metrics_polar_prod['MSE']:.4f}", f"{metrics_polar_prod['MAE']:.4f}", f"{metrics_polar_prod['Mean cosine']:.4f}", "base + residual QJL / 비교용 하이브리드"],
         ]))
-        compare_method = st.selectbox("복원 비교용 3D 방법", ["기존 양자화", "TurboQuant", "PolarQuant"], index=1)
+        compare_method = st.selectbox("복원 비교용 3D 방법", ["기존 양자화", "TurboQuant", "TurboQuant + QJL", "PolarQuant", "PolarQuant + QJL"], index=1)
         left, right = st.columns([1.15, 0.95])
         with left:
             data = process_registry[compare_method]
-            compare_pick = plotly_chart_pick(process_figure_3d(data["orig"], data["mid"], data["final"], data["color_ids"], f"{compare_method} 3D 과정", levels, stage1_label=data["stage1_label"], stage2_label=data["stage2_label"], point_indices=process_idx, selected_index=inspect_idx), key="compare_geom_process_chart")
+            compare_pick = plotly_chart_pick(process_figure_3d(data["stages"], data["color_ids"], f"{compare_method} 3D 과정", levels, point_indices=process_idx, selected_index=inspect_idx), key="compare_geom_process_chart")
             update_inspect_vector(compare_pick, n_points - 1)
             st.caption("복원 비교 탭에서도 점을 클릭하면 공통 단면 예시 벡터 번호가 업데이트됩니다.")
         with right:
@@ -2535,7 +2688,27 @@ with compare_tab:
                     selected_original_pair=turbo_original_pair,
                     selected_quant_pair=turbo_quant_pair,
                 ), width="stretch", theme=None)
-            else:
+            elif compare_method == "TurboQuant + QJL":
+                turbo_prod_original_pair = turbo_prod_details["rot"][inspect_idx, pair_start:pair_end]
+                turbo_prod_base_pair = turbo_prod_details["q_rot"][inspect_idx, pair_start:pair_end]
+                turbo_prod_original_cloud = turbo_prod_details["rot"][static_idx, pair_start:pair_end]
+                turbo_prod_base_cloud = turbo_prod_details["q_rot"][static_idx, pair_start:pair_end]
+                st.plotly_chart(pair_cloud_figure(
+                    turbo_prod_original_cloud,
+                    turbo_prod_base_cloud,
+                    f"Turbo + QJL 좌표쌍 구름도 · 좌표쌍 {slice_pair}",
+                    color_ids=turbo_prod_details["color_ids"][static_idx],
+                    levels=levels,
+                    point_indices=static_idx,
+                    selected_index=inspect_idx,
+                    x_grid=turbo_prod_details["codebook"],
+                    y_grid=turbo_prod_details["codebook"],
+                    quant_name="base 좌표쌍 (residual QJL 전 스냅)",
+                    selected_original_pair=turbo_prod_original_pair,
+                    selected_quant_pair=turbo_prod_base_pair,
+                ), width="stretch", theme=None)
+                st.caption("이 단면도는 Turbo + QJL의 base snap을 보여 줍니다. residual QJL 보정은 왼쪽 3D에서 base reconstruction → 잔차 보정 → 최종 복원 단계로 확인하세요.")
+            elif compare_method == "PolarQuant":
                 st.plotly_chart(pair_cloud_figure(
                     polar_original_cloud,
                     polar_quant_cloud,
@@ -2550,6 +2723,26 @@ with compare_tab:
                     selected_quant_pair=polar_quant_pair,
                     radius_rings=np.array([pair_radius(polar_original_pair), pair_radius(polar_quant_pair)]),
                 ), width="stretch", theme=None)
+            else:
+                polar_prod_original_pair = polar_prod_details["rot"][inspect_idx, pair_start:pair_end]
+                polar_prod_base_pair = polar_prod_details["recon_rot"][inspect_idx, pair_start:pair_end]
+                polar_prod_original_cloud = polar_prod_details["rot"][static_idx, pair_start:pair_end]
+                polar_prod_base_cloud = polar_prod_details["recon_rot"][static_idx, pair_start:pair_end]
+                st.plotly_chart(pair_cloud_figure(
+                    polar_prod_original_cloud,
+                    polar_prod_base_cloud,
+                    f"Polar + QJL 좌표쌍 구름도 · 좌표쌍 {slice_pair}",
+                    color_ids=polar_prod_details["color_ids"][static_idx],
+                    levels=levels,
+                    point_indices=static_idx,
+                    selected_index=inspect_idx,
+                    radial_angles=polar_prod_details["first_codebook"],
+                    quant_name="base 좌표쌍 (residual QJL 전 각도 스냅)",
+                    selected_original_pair=polar_prod_original_pair,
+                    selected_quant_pair=polar_prod_base_pair,
+                    radius_rings=np.array([pair_radius(polar_prod_original_pair), pair_radius(polar_prod_base_pair)]),
+                ), width="stretch", theme=None)
+                st.caption("이 단면도는 Polar + QJL의 base angle snap을 보여 줍니다. residual QJL 보정은 왼쪽 3D에서 base reconstruction → 잔차 보정 → 최종 복원 단계로 확인하세요.")
     with compare_ip_tab:
         look_box([
             "QJL 계열은 복원보다 true vs estimated inner product, bias, correlation으로 읽는 편이 정확합니다.",
@@ -2584,9 +2777,9 @@ with compare_tab:
         with right:
             compare_ip_method = st.selectbox("내적 비교용 3D 방법", ["QJL", "Turbo + QJL", "Polar + QJL"], index=1)
             data = process_registry[compare_ip_method]
-            compare_ip_pick = plotly_chart_pick(process_figure_3d(data["orig"], data["mid"], data["final"], data["color_ids"], f"{compare_ip_method} geometry proxy", levels, stage1_label=data["stage1_label"], stage2_label=data["stage2_label"], point_indices=process_idx, selected_index=inspect_idx), key="compare_ip_process_chart")
+            compare_ip_pick = plotly_chart_pick(process_figure_3d(data["stages"], data["color_ids"], f"{compare_ip_method} geometry proxy", levels, point_indices=process_idx, selected_index=inspect_idx), key="compare_ip_process_chart")
             update_inspect_vector(compare_ip_pick, n_points - 1)
-            st.caption("이 3D 그림은 QJL 계열의 sign sketch 흐름을 설명하는 보조 시각화입니다. 핵심 평가는 왼쪽의 inner product / attention score 그래프입니다.")
+            st.caption("이 3D 그림은 QJL 계열의 sign sketch 흐름과 하이브리드의 base→residual→final 복원 경로를 설명하는 보조 시각화입니다. 핵심 평가는 왼쪽의 inner product / attention score 그래프입니다.")
         with st.expander("내적 비교 추가 그래프", expanded=False):
             bottom_left, bottom_mid, bottom_right = st.columns(3)
             with bottom_left:

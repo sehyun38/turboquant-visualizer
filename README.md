@@ -137,7 +137,7 @@ streamlit run app.py
 테스트 실행:
 
 ```bash
-python -m unittest discover -s tests -v
+pytest
 ```
 
 ---
@@ -155,3 +155,9 @@ python -m unittest discover -s tests -v
 
 이 저장소는 **TurboQuant, PolarQuant, QJL이 각각 어떤 정보를 보존하려 하는지**를,
 기존 양자화 baseline까지 포함해 **직접 보고 비교할 수 있게 만든 시각화 설명용 데모**입니다.
+
+
+## 상태 유지 / 캐시
+
+- 사이드바의 주요 조건들은 각자 독립적인 session state key를 사용합니다. 따라서 차원 d를 바꿔도 데이터 분포, 투영 방식, 정밀도 설정이 같이 초기화되지 않습니다.
+- 데이터 생성, 양자화 계산, 지표 계산처럼 무거운 연산은 `st.cache_data`로 캐시합니다. 현재 단계는 슬라이더와 Play/Pause로 계속 추적하면서, 무거운 계산만 재사용하도록 구성했습니다.
